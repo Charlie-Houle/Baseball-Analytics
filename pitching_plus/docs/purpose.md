@@ -13,6 +13,7 @@ Create "+" style model that scores on following fronts:
 - Reaction time: calculate time (with extension) for ball to travel to home plate
 - Reaction x Movement: how much ball deviates in given reaction time
 - Importantly: 105 Stuff+ fastball is not necessarily "better" than 100 Stuff+ curveball
+- Does account for difference from other pitches (e.g. changeup velocity diff to primary fastball)
 - Aggregated to pitch type
 
 #### Location+: 
@@ -35,5 +36,5 @@ Create "+" style model that scores on following fronts:
 ### Planned Workflow
 1. Stuff+: Calculate Stuff+ figures for each pitch type
 2. Location+: run expectancy change for pitch thrown in location given type and situation
-3. Pitching+: identify weight that seems to produce best results (xWOBA? xERA? TBD)
+3. Pitching+: identify weight that seems to produce best results (Try to predict xWOBA? xERA? xRE?)
 4. bestPitch+: identify discrepancy between Pitching+ and the optimal pitch (scores and run expectancy change)
