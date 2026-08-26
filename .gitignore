@@ -219,5 +219,10 @@ __marimo__/
 
 # Data folder
 data/
+
+# Trained model artifacts (large binaries, regenerable from data/ -- see
+# pitching_plus/location.py)
+pitching_plus/models/
+
 # Claude
 .claude/
