@@ -8,8 +8,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from location import add_location_plus
-from stuff import add_stuff_plus
+try:
+    from .location import add_location_plus
+    from .stuff import add_stuff_plus
+except ImportError:
+    from location import add_location_plus
+    from stuff import add_stuff_plus
 
 DEFAULT_INPUT = Path(__file__).resolve().parent.parent.parent / "data" / "MLB_2021-2025.csv"
 DEFAULT_OUTPUT = Path(__file__).resolve().parent.parent.parent / "data" / "MLB_2021-2025_plus.csv"

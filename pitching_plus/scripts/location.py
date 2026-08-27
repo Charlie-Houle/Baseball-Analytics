@@ -36,7 +36,16 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.model_selection import KFold, cross_val_predict
 
-from stuff import JUNK_PITCH_TYPES, MIN_PITCHES_FOR_SCORE, PITCH_TYPE_COL, PITCHER_COL, SEASON_COL
+try:
+    # Package-relative import: works when this module is imported as
+    # pitching_plus.scripts.location (e.g. from tests, or other code outside
+    # scripts/) without needing scripts/ on sys.path.
+    from .stuff import JUNK_PITCH_TYPES, MIN_PITCHES_FOR_SCORE, PITCH_TYPE_COL, PITCHER_COL, SEASON_COL
+except ImportError:
+    # Bare top-level import: works when this module is run directly
+    # (`python location.py`) or loaded via sys.path.insert(scripts_dir), as
+    # the notebooks and full_pipeline.py do.
+    from stuff import JUNK_PITCH_TYPES, MIN_PITCHES_FOR_SCORE, PITCH_TYPE_COL, PITCHER_COL, SEASON_COL
 
 # ============================================================
 # CONFIGURATION
