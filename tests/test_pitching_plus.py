@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pitching_plus.scripts import location, stuff
+from pitching_plus.scripts import location, pitching, stuff
 
 # ============================================================
 # stuff.py
@@ -208,3 +208,67 @@ def test_add_location_plus_cache_roundtrip_is_deterministic(make_raw_df, monkeyp
     pd.testing.assert_series_equal(
         trained["location_run_value"], cached["location_run_value"]
     )
+
+
+# ============================================================
+# pitching.py
+# ============================================================
+
+
+def test_add_pitching_plus_missing_columns_raises():
+    with pytest.raises(ValueError):
+        pitching.add_pitching_plus(pd.DataFrame({"pitcher": [1]}))
+
+
+def test_add_pitching_plus_junk_and_reliable_calibration_mean_100(make_raw_df, monkeypatch, tmp_path):
+    monkeypatch.setattr(stuff, "MIN_GROUP_SIZE_FOR_PCA", 50)
+    monkeypatch.setattr(stuff, "MIN_PITCHES_FOR_SCORE", 5)
+    monkeypatch.setattr(location, "MIN_GROUP_SIZE_FOR_MODEL", 50)
+    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SCORE", 5)
+    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SEASON_SCORE", 10)
+
+    raw = make_raw_df(
+        n_per_type=300, pitch_types=("FF", "SL"), junk_pitch_types=("KN",),
+        n_pitchers=10, shuffled_index=True,
+    )
+    result = pitching.add_pitching_plus(raw, models_dir=tmp_path, retrain=True)
+
+    assert len(result) == len(raw)
+
+    junk_rows = result["pitch_type"] == "KN"
+    assert junk_rows.any()
+    assert result.loc[junk_rows, ["pitch_pitching_plus", "pitching_plus"]].isna().all().all()
+
+    # raw_ratio_mean anchors the scale so the mean over exactly the reliable
+    # pitcher-pitch_type-season population is 100, same convention as
+    # stuff_plus/location_plus.
+    reliable = result[result["pitching_plus_reliable"].fillna(False)].drop_duplicates(
+        subset=["pitcher", "pitch_type", "game_year"]
+    )
+    assert len(reliable) > 0
+    means = reliable.groupby(["pitch_type", "game_year"])["pitching_plus"].mean()
+    assert all(m == pytest.approx(100.0, abs=1e-6) for m in means)
+
+
+def test_add_pitching_plus_reuses_precomputed_stuff_and_location_columns(make_raw_df, monkeypatch, tmp_path):
+    # add_pitching_plus should not recompute stuff/location scores that are
+    # already present -- full_pipeline.py relies on this to avoid redundant work.
+    monkeypatch.setattr(stuff, "MIN_GROUP_SIZE_FOR_PCA", 50)
+    monkeypatch.setattr(stuff, "MIN_PITCHES_FOR_SCORE", 5)
+    monkeypatch.setattr(location, "MIN_GROUP_SIZE_FOR_MODEL", 50)
+    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SCORE", 5)
+    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SEASON_SCORE", 10)
+
+    raw = make_raw_df(n_per_type=300, pitch_types=("FF",), n_pitchers=10)
+    pre_scored = location.add_location_plus(stuff.add_stuff_plus(raw), models_dir=tmp_path, retrain=True)
+
+    call_count = {"n": 0}
+    real_add_location_plus = pitching.add_location_plus
+
+    def spy(*args, **kwargs):
+        call_count["n"] += 1
+        return real_add_location_plus(*args, **kwargs)
+
+    monkeypatch.setattr(pitching, "add_location_plus", spy)
+    pitching.add_pitching_plus(pre_scored, models_dir=tmp_path, retrain=False)
+    assert call_count["n"] == 0
