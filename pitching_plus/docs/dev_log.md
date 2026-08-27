@@ -250,3 +250,38 @@
   features against run value -- folded into pitching.ipynb's closing
   discussion as the more principled direction for the actual Pitching+ build,
   vs. this notebook's regression-based weight as a reasonable starting point.
+
+# 8/27/2026
+- New branch feat/fangraphs-style-pitching, off main: builds the FanGraphs-style
+  Pitching+ pitching.ipynb's conclusion flagged but didn't build -- one jointly
+  trained model per pitch type on physics + location + count features together,
+  rather than a weighted blend of the two separately-computed scores. Added
+  notebooks/fg_pitching.ipynb. Feature engineering is reused directly from
+  stuff.py's `_build_v1_features` and location.py's `_build_features` (not
+  reimplemented); the joint model is a `HistGradientBoostingRegressor` per pitch
+  type with the exact same hyperparameters and 5-fold OOF-CV scheme
+  location.py's `_train_models` already uses, just fed `STUFF_FEATURES +
+  LOCATION_FEATURES` instead of `LOCATION_FEATURES` alone. Calibrated to the
+  same 100+ ratio scale via location.py's own `_ratio_calibration`/
+  `_to_100_scale` helpers, at the same pitch/pitcher-pitch-type-season dual
+  level as Stuff+/Location+. Top of the reliable leaderboard: Devin Williams'
+  changeup (2025, 148.4) -- a sensible result given the pitch's reputation.
+- Compared the joint model against a weighted-average blend (literally
+  purpose.md's "reward maximized Location+ w/ weight for Stuff+" framing) on
+  a strict 2021-2024-train / 2025-test split, built to be leak-checked in both
+  directions: the joint model only ever trains on 2021-2024, and -- since
+  location.py's cached production model is cross-validated across all five
+  seasons pooled together, which would hand the blend an unfair look-ahead
+  edge on a 2025 test -- the blend's Location+ input is a from-scratch
+  train-only refit via location.py's own `_train_models`, not the cached
+  model. Noted one remaining, much smaller asymmetry left as-is: Stuff+'s PCA
+  loadings are fit pooled across all five seasons by stuff.py's existing
+  design, not re-derived train-only.
+- Result: the weighted-average blend generalizes better (train R^2=0.095,
+  2025 holdout R^2=0.052) than the joint model (train R^2=0.132, holdout
+  R^2=0.039), despite the joint model's richer feature access. The joint
+  model's holdout shrinkage is much steeper (71% relative drop vs. the
+  blend's 45%) -- consistent with overfitting from its far larger parameter
+  count (a full GBM ensemble per pitch type over 19 features vs. an
+  intercept and two slopes) against a target this noisy. Recorded as the
+  headline finding for this branch; not merged into main.
