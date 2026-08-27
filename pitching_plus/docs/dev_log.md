@@ -385,6 +385,17 @@
   pitcher-season "closest to optimal pitch selection" leaderboard (same
   MIN_PITCHES_FOR_SEASON_SCORE reliability bar as location_plus's own
   whole-arsenal score).
+- That leaderboard surfaced a real interpretive caveat: the closest-to-optimal
+  end sits in a plausible 72-84 range, but the most-room-for-improvement end
+  runs 780-1420 -- an order of magnitude larger, and concentrated in the 2024
+  season. best_pitching_plus is a max over ~(arsenal size x 9 zones)
+  candidates per pitch, and the underlying 100+ scale is unbounded above
+  (exp(k*z)) -- a max over that many candidates systematically favors
+  whichever pitcher-season happened to have one candidate land in the long
+  right tail, not a stable read on how much better their pitch selection
+  could realistically be. Documented in bestpitch.ipynb's synopsis rather
+  than treated as a bug; a bounded-candidate or trimmed-mean variant would be
+  the fix if this metric needs to support that specific claim later.
 - Added tests/test_pitching_plus.py coverage for both pitching.py (missing
   columns, junk-type NaN, reliable-population calibration lands on exactly
   100, and a check that add_pitching_plus reuses already-present
