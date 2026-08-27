@@ -248,7 +248,13 @@ def _calibrate(scored):
     reliable_type = pitcher_type_agg[pitcher_type_agg["n_pitches"] >= MIN_PITCHES_FOR_SCORE].copy()
     type_calibration = _ratio_calibration(reliable_type, [PITCH_TYPE_COL, SEASON_COL], "mean_location_value")
 
+    # merge() resets the index, but add_location_plus reattaches this frame's
+    # columns to `result` positionally via has_score.index -- restore it (left
+    # merge on a unique key preserves row order, so this is a straight
+    # relabel, not a reshuffle).
+    original_index = has_score.index
     has_score = has_score.merge(type_calibration, on=[PITCH_TYPE_COL, SEASON_COL], how="left")
+    has_score.index = original_index
     has_score["pitch_location_plus"] = _to_100_scale(has_score["location_run_value"], has_score)
     has_score = has_score.drop(columns=["agg_mu", "agg_sigma", "raw_ratio_mean"])
 

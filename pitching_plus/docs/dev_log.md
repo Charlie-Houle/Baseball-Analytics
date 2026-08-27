@@ -199,3 +199,54 @@
   sample (location.py correctly loaded the real cached models rather than
   retraining). .gitignore's `pitching_plus/models/` entry needed no change,
   since models/ didn't move.
+- Started notebooks/pitching.ipynb: a Pitching+-prep notebook that reconciles
+  Stuff+ against Location+ empirically -- how much of realized run value
+  (`delta_pitcher_run_exp`) each one actually explains, individually and
+  combined -- ahead of building purpose.md's Pitching+ stage. Loads data
+  through add_stuff_plus/add_location_plus (no logic reimplemented) and
+  reasons about the output with correlation, pitch-level OLS, pitcher x
+  pitch-type x season WLS, PCA, a season holdout, and a pitch-sequencing
+  significance test.
+- Found (and fixed) a real bug in stuff.py's pitch-level score assignment
+  while sanity-checking pitching.ipynb's inputs: a pitch's own release_speed
+  should correlate strongly positively with its own pitch_stuff_plus (PCA
+  composite is sign-anchored on release_speed), and it didn't -- ~0 for every
+  pitch type. Root cause: `_score_stuff_plus`'s
+  `stuff_df = stuff_df.merge(calibration, on=[PITCH_TYPE_COL, SEASON_COL], how="left")`
+  silently resets stuff_df's index to a fresh RangeIndex, and
+  `add_stuff_plus` reattaches pitch_stuff_plus back onto raw_df
+  *positionally* via `result.loc[stuff_df.index, ...]` -- after the reset,
+  that index no longer points at the original rows, so pitch_stuff_plus
+  landed on the wrong pitches for most of the dataset. `stuff_plus` (the
+  pitcher-season aggregate) was unaffected, since it's reattached via an
+  actual key-based merge on pitcher/pitch_type/season rather than
+  positionally -- exactly why this stayed invisible in stuff.py's own output
+  and only surfaced once pitch-level Stuff+ was checked against something
+  external to it. Fixed by saving/restoring stuff_df's index around the
+  merge, mirroring the identical fix already present in location.py's
+  `_calibrate`. Confirmed via the same sanity check: own-release_speed vs.
+  own-pitch_stuff_plus correlation went from ~0 to 0.60-0.86 across pitch
+  types (matches location.py's diff to `_calibrate`, which had already
+  caught the same class of bug there). No cached artifacts needed
+  invalidating -- stuff.py doesn't cache anything, and location.py's cache
+  only stores `_train_models`'s output, not `_calibrate`'s.
+- That fix changed pitching.ipynb's results substantially -- with correct
+  pitch-level scores, Stuff+ has a real, significant relationship with run
+  value (aggregate R^2 ~0.02 alone, both R^2 ~0.08 combined with Location+,
+  up from ~0.05 for Location+ alone), and the two combine for a better,
+  holdout-validated fit than either alone.
+- Reviewed FanGraphs' Stuff+/Location+/Pitching+ primer
+  (library.fangraphs.com) for methodology to cross-check against. Two of its
+  claims motivated new checks in pitching.ipynb: (1) Stuff+ and Location+
+  stabilize at very different pitch counts (~80 vs. ~400) -- swept the
+  reliability bar from 20 to 600 pitches and found Stuff+'s R^2 climbs with
+  more data and overtakes Location+'s past a few hundred pitches, while
+  Location+'s is already close to its ceiling at 20-50; (2) Stuff+ is
+  reported as far more year-over-year sticky than Location+ -- confirmed
+  directly (season Y -> Y+1 correlation ~0.89 for Stuff+ vs. ~0.41 for
+  Location+ on pitcher-pitch-type-season aggregates). Also noted the primer
+  states real Pitching+ is not a weighted average of Stuff+ and Location+ but
+  a separately trained ("third") model on physical + location + count
+  features against run value -- folded into pitching.ipynb's closing
+  discussion as the more principled direction for the actual Pitching+ build,
+  vs. this notebook's regression-based weight as a reasonable starting point.

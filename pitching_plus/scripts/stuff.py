@@ -265,7 +265,13 @@ def _score_stuff_plus(df):
     ) / pitcher_agg["raw_ratio_mean"]
     pitcher_agg["reliable"] = pitcher_agg["n_pitches"] >= MIN_PITCHES_FOR_SCORE
 
+    # merge() resets the index, but add_stuff_plus reattaches pitch_stuff_plus to
+    # `result` positionally via stuff_df.index -- restore it (left merge on a
+    # unique key preserves row order, so this is a straight relabel, not a
+    # reshuffle).
+    original_index = stuff_df.index
     stuff_df = stuff_df.merge(calibration, on=[PITCH_TYPE_COL, SEASON_COL], how="left")
+    stuff_df.index = original_index
     stuff_df["pitch_stuff_plus"] = 100 * np.exp(
         STUFF_SCALE_K * (stuff_df["pitch_composite"] - stuff_df["agg_mu"]) / stuff_df["agg_sigma"]
     ) / stuff_df["raw_ratio_mean"]
