@@ -370,15 +370,21 @@
   for its candidates, so a real pitch placed unusually well within its own
   zone can occasionally out-score the zone-average hypothetical for that
   same zone.
-- Note on purpose.md's stated expectation ("[bestPitch+] should always be
-  negative or close to 0"): with bestPitch+ defined literally as written
-  (`bestPitch - Pitching+`), a maximum-over-candidates quantity should be
-  >= the realized value almost by construction, i.e. *positive* or close to
-  0 -- which is exactly what's observed (~97.6% non-negative on the
-  synthetic fixture). Read purpose.md's "negative" as an early-draft
-  sign slip rather than a discrepancy to chase; implemented the formula as
-  literally specified rather than force-fitting the observed sign to that
-  early note.
+- bestPitch+ (`bestPitch - Pitching+`) is a maximum-over-candidates quantity,
+  so it's >= the realized value almost by construction -- positive or close
+  to 0, confirmed at ~97.6% non-negative on the synthetic fixture and ~99.1%
+  on the full 2021-2025 dataset. Corrected purpose.md's original draft note
+  (it had stated the opposite sign) and the bestpitch.py/bestpitch.ipynb text
+  to match.
+- Ran add_bestpitch_plus end-to-end on the full 3,565,743-row dataset
+  (against already-scored stuff/location/pitching columns, so this run only
+  paid the counterfactual search's own cost): 910s, 3,521,353 pitches scored.
+  Built notebooks/bestpitch.ipynb in the same style as the others -- scores
+  the full pipeline, sanity-checks the zone reference grid against Statcast's
+  real 1-9 layout, checks the bestPitch+ sign distribution, and a
+  pitcher-season "closest to optimal pitch selection" leaderboard (same
+  MIN_PITCHES_FOR_SEASON_SCORE reliability bar as location_plus's own
+  whole-arsenal score).
 - Added tests/test_pitching_plus.py coverage for both pitching.py (missing
   columns, junk-type NaN, reliable-population calibration lands on exactly
   100, and a check that add_pitching_plus reuses already-present

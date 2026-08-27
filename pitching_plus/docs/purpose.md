@@ -13,7 +13,7 @@ Create "+" style model that scores on following fronts:
 - Reaction time: calculate time (with extension) for ball to travel to home plate
 - Reaction x Movement: how much ball deviates in given reaction time
 - Importantly: 105 Stuff+ fastball is not necessarily "better" than 100 Stuff+ curveball
-- Does account for difference from other pitches (e.g. changeup velocity diff to primary fastball)
+- Built from a pitch's own physics only (velocity, spin, extension, movement) -- does not compare a pitch against the pitcher's other pitch types (e.g. changeup velocity diff to primary fastball). An arsenal-relative contrast feature was tested and dropped: it didn't change Stuff+ rankings meaningfully (Spearman rho 0.998 against the physics-only version) for a large added compute cost.
 - Aggregated to pitch type
 
 #### Location+: 
@@ -31,10 +31,10 @@ Create "+" style model that scores on following fronts:
 - Given pitcher arsenal (using avg. Stuff+ and Location+ from spot), calculate hypothetical Pitching+ score (bestPitch)
 - Identify if pitch "idea" was good (right pitch type/location)
 - bestPitch - Pitching+ = bestPitch+ 
-- Should always be negative or close to 0
+- bestPitch is the best score across real candidate pitches (from the pitcher's own arsenal), so bestPitch+ should always be positive or close to 0 (it can dip slightly negative when the pitch actually thrown was placed better than a candidate's average reference location for its zone)
 
 ### Planned Workflow
 1. Stuff+: Calculate Stuff+ figures for each pitch type
 2. Location+: run expectancy change for pitch thrown in location given type and situation
-3. Pitching+: identify weight that seems to produce best results (Try to predict xWOBA? xERA? xRE?)
+3. Pitching+: identify weight that seems to produce best results (target is delta_pitcher_run_exp, Statcast's own RE288-consistent per-pitch run expectancy change)
 4. bestPitch+: identify discrepancy between Pitching+ and the optimal pitch (scores and run expectancy change)

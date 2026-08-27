@@ -26,9 +26,11 @@ dataframe and returns it with:
   - `best_pitching_plus`   -- best achievable Pitching+ (100+) from this
                                pitcher's own arsenal/zone options, same
                                situation as the actual pitch.
-  - `pitch_bestpitch_plus` -- best_pitching_plus - pitch_pitching_plus
-                               (purpose.md expects this close to 0; see
-                               docs/dev_log.md for how it actually behaves).
+  - `pitch_bestpitch_plus` -- best_pitching_plus - pitch_pitching_plus;
+                               positive or close to 0 for nearly every pitch
+                               (best_pitching_plus is a max over real
+                               candidates, so it rarely falls below the
+                               realized score -- see notebooks/bestpitch.ipynb).
 
 Calls add_stuff_plus/add_location_plus/add_pitching_plus itself if their
 columns aren't already present. Requires a cached Location+ model (via
