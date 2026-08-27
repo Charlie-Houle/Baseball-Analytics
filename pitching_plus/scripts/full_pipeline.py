@@ -1,7 +1,7 @@
 """
-WIP: runs the full "+" pipeline end-to-end, adding each metric's columns to
-the raw Statcast data in order (Stuff+ -> Location+ -> Pitching+ ->
-bestPitch+; see docs/purpose.md). bestPitch+ isn't implemented yet.
+Runs the full "+" pipeline end-to-end, adding each metric's columns to the
+raw Statcast data in order (Stuff+ -> Location+ -> Pitching+ -> bestPitch+;
+see docs/purpose.md).
 """
 
 from pathlib import Path
@@ -9,10 +9,12 @@ from pathlib import Path
 import pandas as pd
 
 try:
+    from .bestpitch import add_bestpitch_plus
     from .location import add_location_plus
     from .pitching import add_pitching_plus
     from .stuff import add_stuff_plus
 except ImportError:
+    from bestpitch import add_bestpitch_plus
     from location import add_location_plus
     from pitching import add_pitching_plus
     from stuff import add_stuff_plus
@@ -27,8 +29,7 @@ def run_pipeline(input_path=DEFAULT_INPUT, output_path=DEFAULT_OUTPUT):
     df = add_stuff_plus(df)
     df = add_location_plus(df)
     df = add_pitching_plus(df)
-
-    # TODO: bestPitch+ (Pitching+ vs. the optimal pitch for that arsenal/situation)
+    df = add_bestpitch_plus(df)
 
     df.to_csv(output_path, index=False)
     return df

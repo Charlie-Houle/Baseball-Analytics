@@ -312,3 +312,79 @@
   could change this) -- but for this repo's current data/tools, the
   weighted-blend recommendation from the first synopsis stands as the basis
   for building Pitching+ next.
+
+# 8/27/2026 (cont'd): Pitching+ and bestPitch+ shipped
+- Ported the validated weighted-blend recipe into pitching_plus/pitching.py:
+  `add_pitching_plus(raw_df) -> raw_df`, mirroring stuff.py/location.py's
+  shape. One pooled WLS blend (z-scored log(stuff_plus) + mean
+  location_run_value against delta_pitcher_run_exp, weighted by n_pitches),
+  fit fresh on every call like stuff.py's PCA (cheap -- a few thousand
+  aggregate rows, no need for location.py's model-caching machinery). Applies
+  the same fitted weights at both the pitch level and the (pitcher,
+  pitch_type, season) aggregate level, then calibrates both to the 100+ ratio
+  scale via location.py's own `_ratio_calibration`/`_to_100_scale` (reused,
+  not reimplemented). Wired into full_pipeline.py after add_location_plus.
+  Ran end-to-end on the full 3,565,743-row dataset (chained with the existing
+  add_stuff_plus/add_location_plus): reliable-population calibration lands
+  exactly on 100 per (pitch_type, season) as designed; top of the leaderboard
+  (Treinen 2022 sinker 143.0, Murray 2025 sinker 141.3, Montero 2022 changeup
+  135.8) are plausible names/pitches, not small-sample noise.
+- Refactored pitching.py's internal blend fit into `_fit_pitching_plus_model`
+  (returns blend_params + the 100+ calibration table + pitcher_agg) and
+  `_score_pitching_plus` (pure function: applies an already-fitted
+  blend/calibration to arbitrary stuff/location inputs) -- needed so
+  bestpitch.py can score *hypothetical* pitches on the exact same fitted
+  scale as real ones, not a separately re-derived one. Confirmed via the
+  full pytest suite that add_pitching_plus's output is unchanged after the
+  refactor.
+- Built pitching_plus/bestpitch.py for purpose.md's last stage: "given
+  pitcher arsenal, calculate hypothetical Pitching+ score (bestPitch)" then
+  `bestPitch - Pitching+ = bestPitch+`. Design: for each in-scope pitch, hold
+  the real situation fixed (count, outs, base state, handedness) and search
+  every (candidate pitch type from that pitcher's own RELIABLE arsenal that
+  season x candidate zone) combination -- zones are Statcast's real `zone`
+  1-9 in-zone codes (purpose.md's "zone, not pinpoint"), represented by that
+  zone's dataset-wide average (plate_x, plate_z_rel), not a synthetic point
+  or a per-pitch-type-specific location (a pitch type's own typical spot
+  within a zone is a targeting choice the location model itself already
+  captures). Each candidate is scored by combining the pitcher's own real
+  stuff_plus for that pitch type with location.py's own cached model's
+  prediction for that zone (added `location.load_cached_models` to expose
+  the cache for this), run through pitching.py's `_score_pitching_plus` --
+  the identical fitted blend/calibration as real Pitching+ scores, so
+  "best" and "actual" are directly comparable. The max across all valid
+  candidates is `best_pitching_plus`.
+- Found and fixed a real scope-filtering bug while building this: initially
+  folded BASE_STATE_COLS (on_1b/on_2b/on_3b) into the dropna gate alongside
+  the rest of REQUIRED_COLS, which wrongly required all three bases occupied
+  to keep a row (NaN there is a real "base empty" state, per location.py's
+  own established convention) -- on a synthetic test fixture this dropped
+  ~98% of rows (19/900 scored) before the fix. Caught by smoke-testing
+  against the same synthetic fixture used for stuff.py/location.py's tests
+  before writing formal pytest cases; fixed by keeping BASE_STATE_COLS out of
+  the dropna subset, exactly mirroring location.py's own in-scope filtering.
+- Result on the same synthetic fixture (900 in-scope pitches, 3 pitch types,
+  10 pitchers): best_pitching_plus meets or exceeds the realized
+  pitch_pitching_plus for ~97.6% of pitches. The ~2.4% exceptions are
+  expected, not a bug: `best_pitching_plus` uses a *zone-average* location
+  for its candidates, so a real pitch placed unusually well within its own
+  zone can occasionally out-score the zone-average hypothetical for that
+  same zone.
+- Note on purpose.md's stated expectation ("[bestPitch+] should always be
+  negative or close to 0"): with bestPitch+ defined literally as written
+  (`bestPitch - Pitching+`), a maximum-over-candidates quantity should be
+  >= the realized value almost by construction, i.e. *positive* or close to
+  0 -- which is exactly what's observed (~97.6% non-negative on the
+  synthetic fixture). Read purpose.md's "negative" as an early-draft
+  sign slip rather than a discrepancy to chase; implemented the formula as
+  literally specified rather than force-fitting the observed sign to that
+  early note.
+- Added tests/test_pitching_plus.py coverage for both pitching.py (missing
+  columns, junk-type NaN, reliable-population calibration lands on exactly
+  100, and a check that add_pitching_plus reuses already-present
+  stuff/location columns instead of recomputing them) and bestpitch.py
+  (missing columns, junk-type NaN, best-meets-or-exceeds-actual on >90% of
+  in-scope pitches). Added a `zone` column to the shared synthetic fixture
+  (tests/conftest.py) via a rough 3x3 plate_x/plate_z_rel grid, matching
+  Statcast's real 1-9 numbering closely enough to exercise the zone-grid
+  logic (not intended to test real zone semantics).

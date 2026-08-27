@@ -178,6 +178,24 @@ def _train_models(df):
     return models, historical_scores
 
 
+def load_cached_models(models_dir=DEFAULT_MODELS_DIR):
+    """
+    Loads just the cached per-pitch-type models (no scoring), for callers that
+    need to score counterfactual inputs directly -- e.g. bestpitch.py scoring
+    hypothetical (pitch_type, location) combinations a pitcher never actually
+    threw. Raises FileNotFoundError with a clear message if the cache doesn't
+    exist yet (run add_location_plus, or `python location.py --retrain`, first).
+    """
+
+    models_path = Path(models_dir) / "location_models.joblib"
+    if not models_path.exists():
+        raise FileNotFoundError(
+            f"No cached Location+ models at {models_path}. Run add_location_plus "
+            "(or `python location.py --retrain`) at least once first."
+        )
+    return joblib.load(models_path)
+
+
 def _load_or_score(engineered, models_dir, retrain):
     models_dir = Path(models_dir)
     models_path = models_dir / "location_models.joblib"
