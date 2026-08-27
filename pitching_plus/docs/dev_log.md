@@ -285,3 +285,30 @@
   count (a full GBM ensemble per pitch type over 19 features vs. an
   intercept and two slopes) against a target this noisy. Recorded as the
   headline finding for this branch; not merged into main.
+- Followed up rather than shelving the joint model: added a regularization
+  sweep to fg_pitching.ipynb testing whether tuning HistGradientBoostingRegressor's
+  hyperparameters (left unchanged from location.py's originals for the first,
+  fair comparison) closes the gap. Three configs, identical per-pitch-type
+  5-fold OOF-CV and aggregate/holdout evaluation harness as the original
+  comparison: shallower trees + much stronger L2 (max_depth=3,
+  l2_regularization=10.0, min_samples_leaf=50), aggressive early stopping
+  (max_iter=1000, validation_fraction=0.2, n_iter_no_change=5), and both
+  combined.
+- Result: none close the gap to the blend's 0.0523 holdout R^2. Aggressive
+  early stopping alone is the best variant (holdout R^2 0.0386 -> 0.0417,
+  ~8% relative gain, shrinkage 71% -> 67%) -- some support for the original
+  fixed max_iter=300 having run a bit past the point of real generalization.
+  Shallow+L2 alone barely moves it (0.0395). Combining both regularizers is
+  worse than either alone (train R^2 drops to 0.1204, the lowest of any
+  joint variant, holdout drops to 0.0380) -- stacked regularization tips
+  into underfitting rather than compounding.
+- Conclusion: rules out "the joint model just needed more regularization" as
+  the explanation for the original result. Points instead to a structural
+  reason no amount of hyperparameter tuning on this same model family
+  reaches: the blend's inputs (Stuff+, Location+) are each already
+  calibrated/regularized per-season summaries, not raw per-pitch features
+  fit flat against four prior seasons. Doesn't rule out a joint model in
+  general (more data, a different regularization family, or better inputs
+  could change this) -- but for this repo's current data/tools, the
+  weighted-blend recommendation from the first synopsis stands as the basis
+  for building Pitching+ next.
