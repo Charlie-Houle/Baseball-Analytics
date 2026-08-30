@@ -31,7 +31,7 @@ Create "+" style model that scores on following fronts:
 - Given pitcher arsenal (using avg. Stuff+ and Location+ from spot), calculate hypothetical Pitching+ score (bestPitch)
 - Identify if pitch "idea" was good (right pitch type/location)
 - bestPitch - Pitching+ = bestPitch+ 
-- bestPitch is the best score across real candidate pitches (from the pitcher's own arsenal), so bestPitch+ should always be positive or close to 0 (it can dip slightly negative when the pitch actually thrown was placed better than a candidate's average reference location for its zone)
+- Both bestPitch and the actual pitch's own score are evaluated the same way: averaged over a small "target" area around a location (not a single pinpoint), since no pitcher hits an exact spot. bestPitch is the best score across real candidate (pitch type, zone) combinations from the pitcher's own arsenal, and the actual pitch's own combination is always one of those candidates -- so bestPitch+ is positive or close to 0 for nearly every pitch (typical magnitude is small, a handful of points on the 100+ scale, not a large gap)
 
 ### Planned Workflow
 1. Stuff+: Calculate Stuff+ figures for each pitch type

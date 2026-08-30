@@ -59,11 +59,31 @@ PITCHING_SCALE_K = 0.10
 # but so bestpitch.py can score *hypothetical* (pitch_type, location)
 # combinations on the exact same fitted blend/calibration, not a re-derived
 # one.
+#
+# The WLS regression itself is fit once, on the (pitcher, pitch_type, season)
+# AGGREGATE population -- but Location+'s raw input (location_run_value) has
+# very different natural spread at the two levels: an aggregate is a mean over
+# many pitches (low variance), a single pitch's value isn't (much higher
+# variance). Using the aggregate's spread to z-score pitch-level values would
+# inflate every pitch-level z-score, and therefore every pitch-level score's
+# distance from 100 -- which compounds badly for bestpitch.py, since taking a
+# max over several such over-wide pitch-level scores biases the max even
+# further upward (order statistics). So the location term gets its own
+# level-appropriate sigma (`loc_sigma_agg` vs. `loc_sigma_pitch`) and its own
+# 100+ calibration per level (`calibration` vs. `pitch_calibration`) -- same
+# regression coefficients and the same `loc_mu`, just scaled correctly for
+# what's actually being scored. Stuff+'s contribution needs no such split:
+# both levels already use the same (pitcher, pitch_type, season) aggregate
+# stuff_plus value, never a separate pitch-level composite.
 # ============================================================
 
-def _apply_blend(mean_stuff_plus, mean_location_run_value, blend_params):
+def _apply_blend(mean_stuff_plus, location_run_value, blend_params, level):
+    if level not in ("aggregate", "pitch"):
+        raise ValueError(f"level must be 'aggregate' or 'pitch', got {level!r}")
+
     stuff_z = (np.log(mean_stuff_plus) - blend_params["log_stuff_mu"]) / blend_params["log_stuff_sigma"]
-    loc_z = (mean_location_run_value - blend_params["loc_mu"]) / blend_params["loc_sigma"]
+    loc_sigma = blend_params["loc_sigma_agg"] if level == "aggregate" else blend_params["loc_sigma_pitch"]
+    loc_z = (location_run_value - blend_params["loc_mu"]) / loc_sigma
     return blend_params["intercept"] + blend_params["beta_stuff"] * stuff_z + blend_params["beta_loc"] * loc_z
 
 
@@ -74,16 +94,23 @@ def _fit_pitching_plus_model(df):
     so pooling is a stability choice, not a pattern-hiding one) of z-scored
     log(stuff_plus) and mean location_run_value against realized run value, on
     the reliable (pitcher, pitch_type, season) aggregate population. Also fits
-    the 100+ ratio-scale calibration on that same population's raw_pitching_value.
+    a 100+ ratio-scale calibration for each of the two levels (see module
+    docstring for why they need separate ones).
 
-    Returns (blend_params, calibration, pitcher_agg):
-      blend_params -- dict of fitted WLS coefficients + z-scoring mu/sigma,
-                       sufficient to score any (mean_stuff_plus,
-                       mean_location_run_value) pair, real or hypothetical.
-      calibration   -- per (pitch_type, season) 100+ scale reference, from
-                        location.py's own _ratio_calibration.
-      pitcher_agg   -- one row per (pitcher, pitch_type, season), with
-                        raw_pitching_value/pitching_plus and a `reliable` flag.
+    Returns (blend_params, calibration, pitch_calibration, pitcher_agg):
+      blend_params      -- dict of fitted WLS coefficients + z-scoring
+                            mu/sigma (both levels), sufficient to score any
+                            (mean_stuff_plus, location_run_value) pair, real
+                            or hypothetical, at either level.
+      calibration        -- per (pitch_type, season) 100+ scale reference for
+                             AGGREGATE-level raw_pitching_value.
+      pitch_calibration  -- per (pitch_type, season) 100+ scale reference for
+                             PITCH-level raw_pitching_value, fit on its own
+                             (wider) distribution rather than borrowing the
+                             aggregate one.
+      pitcher_agg        -- one row per (pitcher, pitch_type, season), with
+                             raw_pitching_value/pitching_plus and a `reliable`
+                             flag.
     """
 
     pitcher_agg = (
@@ -103,13 +130,13 @@ def _fit_pitching_plus_model(df):
         "log_stuff_mu": np.log(reliable["mean_stuff_plus"]).mean(),
         "log_stuff_sigma": np.log(reliable["mean_stuff_plus"]).std(),
         "loc_mu": reliable["mean_location_run_value"].mean(),
-        "loc_sigma": reliable["mean_location_run_value"].std(),
+        "loc_sigma_agg": reliable["mean_location_run_value"].std(),
         "intercept": 0.0,
         "beta_stuff": 0.0,
         "beta_loc": 0.0,
     }
     reliable["stuff_z"] = (np.log(reliable["mean_stuff_plus"]) - blend_params["log_stuff_mu"]) / blend_params["log_stuff_sigma"]
-    reliable["loc_z"] = (reliable["mean_location_run_value"] - blend_params["loc_mu"]) / blend_params["loc_sigma"]
+    reliable["loc_z"] = (reliable["mean_location_run_value"] - blend_params["loc_mu"]) / blend_params["loc_sigma_agg"]
 
     model = sm.WLS(
         reliable["mean_rv"],
@@ -120,8 +147,16 @@ def _fit_pitching_plus_model(df):
     blend_params["beta_stuff"] = model.params["stuff_z"]
     blend_params["beta_loc"] = model.params["loc_z"]
 
+    # Pitch-level sigma for the location term: the natural spread of raw,
+    # per-pitch location_run_value among pitches belonging to a reliable
+    # (pitcher, pitch_type, season) -- NOT the spread of that group's own
+    # mean (blend_params["loc_sigma_agg"] above), which is far narrower.
+    reliable_keys = reliable[[PITCHER_COL, PITCH_TYPE_COL, SEASON_COL]]
+    df_reliable = df.merge(reliable_keys, on=[PITCHER_COL, PITCH_TYPE_COL, SEASON_COL], how="inner")
+    blend_params["loc_sigma_pitch"] = df_reliable["location_run_value"].std()
+
     pitcher_agg["raw_pitching_value"] = _apply_blend(
-        pitcher_agg["mean_stuff_plus"], pitcher_agg["mean_location_run_value"], blend_params
+        pitcher_agg["mean_stuff_plus"], pitcher_agg["mean_location_run_value"], blend_params, level="aggregate"
     )
     reliable = pitcher_agg[pitcher_agg["reliable"]]
     calibration = _ratio_calibration(reliable, [PITCH_TYPE_COL, SEASON_COL], "raw_pitching_value")
@@ -129,20 +164,32 @@ def _fit_pitching_plus_model(df):
     pitcher_agg = pitcher_agg.merge(calibration, on=[PITCH_TYPE_COL, SEASON_COL], how="left")
     pitcher_agg["pitching_plus"] = _to_100_scale(pitcher_agg["raw_pitching_value"], pitcher_agg)
 
-    return blend_params, calibration, pitcher_agg
+    # Pitch-level calibration: fit on the pitch-level raw_pitching_value
+    # distribution itself (every pitch belonging to a reliable pitcher-
+    # pitch-type-season), not borrowed from the aggregate distribution above.
+    df_reliable = df_reliable.copy()
+    df_reliable["raw_pitching_value"] = _apply_blend(
+        df_reliable["stuff_plus"], df_reliable["location_run_value"], blend_params, level="pitch"
+    )
+    pitch_calibration = _ratio_calibration(df_reliable, [PITCH_TYPE_COL, SEASON_COL], "raw_pitching_value")
+
+    return blend_params, calibration, pitch_calibration, pitcher_agg
 
 
-def _score_pitching_plus(mean_stuff_plus, mean_location_run_value, pitch_type, season, blend_params, calibration):
+def _score_pitching_plus(mean_stuff_plus, location_run_value, pitch_type, season, blend_params, calibration, level):
     """
     Applies an already-fitted blend + 100+ calibration to arbitrary
-    (mean_stuff_plus, mean_location_run_value) inputs -- real or hypothetical
+    (mean_stuff_plus, location_run_value) inputs -- real or hypothetical
     (e.g. bestpitch.py's counterfactual pitch-type/zone combinations) --
-    keyed by pitch_type/season for calibration lookup. Returns NaN wherever
+    keyed by pitch_type/season for calibration lookup. `level` must be
+    "aggregate" or "pitch" and must match what `calibration` was fit for
+    (pitcher_agg-level scoring needs `calibration`; single-pitch scoring,
+    real or hypothetical, needs `pitch_calibration`). Returns NaN wherever
     that (pitch_type, season) has no calibration (too few reliable
     pitcher-seasons to set a reference).
     """
 
-    raw_pitching_value = _apply_blend(mean_stuff_plus, mean_location_run_value, blend_params)
+    raw_pitching_value = _apply_blend(mean_stuff_plus, location_run_value, blend_params, level=level)
     frame = pd.DataFrame(
         {PITCH_TYPE_COL: np.asarray(pitch_type), SEASON_COL: np.asarray(season), "raw_pitching_value": np.asarray(raw_pitching_value)}
     )
@@ -174,13 +221,13 @@ def add_pitching_plus(raw_df, models_dir=DEFAULT_MODELS_DIR, retrain=False):
 
     in_scope = raw_df.dropna(subset=["pitch_stuff_plus", "stuff_plus", "location_run_value", TARGET_COL]).copy()
 
-    blend_params, calibration, pitcher_agg = _fit_pitching_plus_model(in_scope)
+    blend_params, calibration, pitch_calibration, pitcher_agg = _fit_pitching_plus_model(in_scope)
 
     pitch_level = in_scope
     pitch_level["pitch_pitching_plus"] = _score_pitching_plus(
         pitch_level["stuff_plus"], pitch_level["location_run_value"],
         pitch_level[PITCH_TYPE_COL], pitch_level[SEASON_COL],
-        blend_params, calibration,
+        blend_params, pitch_calibration, level="pitch",
     )
 
     result = raw_df.copy()
