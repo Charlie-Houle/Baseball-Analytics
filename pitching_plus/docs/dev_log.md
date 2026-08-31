@@ -250,3 +250,46 @@
   features against run value -- folded into pitching.ipynb's closing
   discussion as the more principled direction for the actual Pitching+ build,
   vs. this notebook's regression-based weight as a reasonable starting point.
+
+# 8/31/2026: new branch, off main -- continuing the FanGraphs-joint-model check
+- New branch feat/pitching-plus-v2, off main (not off the prior
+  feat/fangraphs-style-pitching branch, which drifted from investigating the
+  joint model into shipping Pitching+/bestPitch+ as production code before
+  that investigation was actually finished). Fixed purpose.md first: a typo,
+  a Stuff+ claim contradicting stuff.py's actual (physics-only) design, the
+  bestPitch+ sign (was documented backwards), and the Pitching+ workflow
+  item's target metric (named speculative xwOBA/xERA/xRE options that were
+  superseded once Location+ settled on delta_pitcher_run_exp).
+- Added requirements.txt/requirements-dev.txt, pitching_plus/__init__.py +
+  scripts/__init__.py, and a pytest suite for stuff.py/location.py (ported
+  from the prior branch) before any new modeling work -- main had been
+  missing this despite already depending on numpy/pandas/scikit-learn/
+  statsmodels/joblib/pybaseball.
+- Brought over notebooks/fg_pitching.ipynb (the FanGraphs-style joint-model
+  comparison) and reran it end-to-end to confirm it reproduces: identical
+  numbers to the prior branch's run (weighted blend train R^2=0.0954/holdout
+  R^2=0.0523; joint model 0.1318/0.0386; the three regularized joint variants
+  match to 4 decimal places).
+- Pushed the investigation one step further than the prior branch did: does
+  feeding the joint model the blend's own two calibrated inputs (log_stuff,
+  location_run_value) instead of 19 raw physics/location features close the
+  gap, rather than just regularizing the raw-feature model harder? Same
+  per-pitch-type 5-fold OOF-CV scheme, same unregularized hyperparameters,
+  same train(2021-2024)/test(2025) split and evaluation harness as every
+  other row in the comparison.
+- Result: worse, not better. Holdout R^2 0.0343 (75% shrinkage from train's
+  0.1380) -- the worst generalization of every joint variant tried, including
+  the explicitly-regularized ones, despite the highest train R^2 of the
+  bunch. An unconstrained HistGradientBoostingRegressor with only two
+  features still has plenty of capacity to carve fine-grained threshold
+  interactions between them that fit train-season noise and don't carry over
+  to a new season. This rules out "wrong inputs" as the explanation alongside
+  the prior branch's "needs more regularization" -- the blend's advantage is
+  the linear, additive, two-parameter functional form itself, not what it's
+  fed or how it's tuned.
+- Conclusion: for this repo's current data and tools, the weighted-average
+  blend is the validated choice for Pitching+, not a placeholder pending a
+  better joint model -- two independent angles on "make the joint model
+  competitive" (regularization, then input choice) both failed to close the
+  gap. Porting the prior branch's pitching.py/bestpitch.py (already built on
+  the weighted blend, already validated and bug-fixed) next.
