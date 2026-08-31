@@ -41,10 +41,7 @@ def test_add_stuff_plus_missing_columns_raises():
         stuff.add_stuff_plus(pd.DataFrame({"pitcher": [1]}))
 
 
-def test_add_stuff_plus_junk_pitch_types_get_nan(make_raw_df, monkeypatch):
-    monkeypatch.setattr(stuff, "MIN_GROUP_SIZE_FOR_PCA", 50)
-    monkeypatch.setattr(stuff, "MIN_PITCHES_FOR_SCORE", 5)
-
+def test_add_stuff_plus_junk_pitch_types_get_nan(make_raw_df, small_stuff_thresholds):
     raw = make_raw_df(n_per_type=200, pitch_types=("FF",), junk_pitch_types=("KN",))
     result = stuff.add_stuff_plus(raw)
 
@@ -53,15 +50,12 @@ def test_add_stuff_plus_junk_pitch_types_get_nan(make_raw_df, monkeypatch):
     assert result.loc[junk_rows, ["pitch_stuff_plus", "stuff_plus"]].isna().all().all()
 
 
-def test_add_stuff_plus_row_alignment_and_reliable_calibration_mean_100(make_raw_df, monkeypatch):
+def test_add_stuff_plus_row_alignment_and_reliable_calibration_mean_100(make_raw_df, small_stuff_thresholds):
     # Regression test for the index-misalignment bug (docs/dev_log.md 8/26):
     # `_score_stuff_plus`'s calibration merge used to silently reset
     # stuff_df's index, so add_stuff_plus's positional `.loc[stuff_df.index]`
     # reattachment landed pitch_stuff_plus on the wrong rows whenever the
     # input's index wasn't a clean default RangeIndex.
-    monkeypatch.setattr(stuff, "MIN_GROUP_SIZE_FOR_PCA", 50)
-    monkeypatch.setattr(stuff, "MIN_PITCHES_FOR_SCORE", 5)
-
     raw = make_raw_df(n_per_type=300, pitch_types=("FF",), n_pitchers=10, shuffled_index=True)
     result = stuff.add_stuff_plus(raw)
 

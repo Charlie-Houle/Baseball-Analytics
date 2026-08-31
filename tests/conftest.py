@@ -6,13 +6,18 @@ every column required by both stuff.py and location.py, with just enough
 physical/statistical structure (real variance tied to release_speed and
 plate location) that calibration/regression logic has something meaningful
 to work on, without needing MIN_GROUP_SIZE_FOR_PCA/MIN_GROUP_SIZE_FOR_MODEL's
-production-sized (5000+) row counts. Tests that need those thresholds small
-enough to run against this fixture's row counts should monkeypatch them.
+production-sized (5000+) row counts.
+
+`small_stuff_thresholds`/`small_location_thresholds` lower those (and
+MIN_PITCHES_FOR_SCORE/MIN_PITCHES_FOR_SEASON_SCORE) to values this fixture's
+row counts can actually satisfy -- request whichever module(s) a test scores.
 """
 
 import numpy as np
 import pandas as pd
 import pytest
+
+from pitching_plus.scripts import location, stuff
 
 
 def _build_raw_df(
@@ -135,3 +140,16 @@ def _build_raw_df(
 @pytest.fixture
 def make_raw_df():
     return _build_raw_df
+
+
+@pytest.fixture
+def small_stuff_thresholds(monkeypatch):
+    monkeypatch.setattr(stuff, "MIN_GROUP_SIZE_FOR_PCA", 50)
+    monkeypatch.setattr(stuff, "MIN_PITCHES_FOR_SCORE", 5)
+
+
+@pytest.fixture
+def small_location_thresholds(monkeypatch):
+    monkeypatch.setattr(location, "MIN_GROUP_SIZE_FOR_MODEL", 50)
+    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SCORE", 5)
+    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SEASON_SCORE", 10)

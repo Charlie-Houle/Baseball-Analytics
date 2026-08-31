@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from pitching_plus.scripts import bestpitch, location, stuff
+from pitching_plus.scripts import bestpitch
 
 
 def test_add_bestpitch_plus_missing_columns_raises():
@@ -9,13 +9,9 @@ def test_add_bestpitch_plus_missing_columns_raises():
         bestpitch.add_bestpitch_plus(pd.DataFrame({"pitcher": [1]}))
 
 
-def test_add_bestpitch_plus_junk_and_best_meets_or_exceeds_actual(make_raw_df, monkeypatch, tmp_path):
-    monkeypatch.setattr(stuff, "MIN_GROUP_SIZE_FOR_PCA", 50)
-    monkeypatch.setattr(stuff, "MIN_PITCHES_FOR_SCORE", 5)
-    monkeypatch.setattr(location, "MIN_GROUP_SIZE_FOR_MODEL", 50)
-    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SCORE", 5)
-    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SEASON_SCORE", 10)
-
+def test_add_bestpitch_plus_junk_and_best_meets_or_exceeds_actual(
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, tmp_path
+):
     raw = make_raw_df(
         n_per_type=300, pitch_types=("FF", "SL", "CU"), junk_pitch_types=("KN",),
         n_pitchers=10, shuffled_index=True,

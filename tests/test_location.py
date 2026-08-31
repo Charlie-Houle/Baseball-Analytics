@@ -66,13 +66,9 @@ def test_add_location_plus_missing_columns_raises():
         location.add_location_plus(pd.DataFrame({"pitcher": [1]}))
 
 
-def test_add_location_plus_row_alignment_and_scope(make_raw_df, monkeypatch, tmp_path):
+def test_add_location_plus_row_alignment_and_scope(make_raw_df, small_location_thresholds, tmp_path):
     # Same class of index-alignment regression as stuff.py's equivalent test --
     # `_calibrate` had (and dev_log.md 8/26 fixed) the identical bug.
-    monkeypatch.setattr(location, "MIN_GROUP_SIZE_FOR_MODEL", 50)
-    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SCORE", 5)
-    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SEASON_SCORE", 10)
-
     raw = make_raw_df(
         n_per_type=300, pitch_types=("FF",), junk_pitch_types=("KN",),
         n_pitchers=10, shuffled_index=True,
@@ -95,11 +91,7 @@ def test_add_location_plus_row_alignment_and_scope(make_raw_df, monkeypatch, tmp
     assert scored["plate_x"].abs().corr(scored["location_run_value"]) < -0.1
 
 
-def test_add_location_plus_cache_roundtrip_is_deterministic(make_raw_df, monkeypatch, tmp_path):
-    monkeypatch.setattr(location, "MIN_GROUP_SIZE_FOR_MODEL", 50)
-    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SCORE", 5)
-    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SEASON_SCORE", 10)
-
+def test_add_location_plus_cache_roundtrip_is_deterministic(make_raw_df, small_location_thresholds, tmp_path):
     raw = make_raw_df(n_per_type=300, pitch_types=("FF",), n_pitchers=10)
 
     trained = location.add_location_plus(raw, models_dir=tmp_path, retrain=True)

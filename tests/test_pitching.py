@@ -9,13 +9,9 @@ def test_add_pitching_plus_missing_columns_raises():
         pitching.add_pitching_plus(pd.DataFrame({"pitcher": [1]}))
 
 
-def test_add_pitching_plus_junk_and_reliable_calibration_mean_100(make_raw_df, monkeypatch, tmp_path):
-    monkeypatch.setattr(stuff, "MIN_GROUP_SIZE_FOR_PCA", 50)
-    monkeypatch.setattr(stuff, "MIN_PITCHES_FOR_SCORE", 5)
-    monkeypatch.setattr(location, "MIN_GROUP_SIZE_FOR_MODEL", 50)
-    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SCORE", 5)
-    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SEASON_SCORE", 10)
-
+def test_add_pitching_plus_junk_and_reliable_calibration_mean_100(
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, tmp_path
+):
     raw = make_raw_df(
         n_per_type=300, pitch_types=("FF", "SL"), junk_pitch_types=("KN",),
         n_pitchers=10, shuffled_index=True,
@@ -39,7 +35,9 @@ def test_add_pitching_plus_junk_and_reliable_calibration_mean_100(make_raw_df, m
     assert all(m == pytest.approx(100.0, abs=1e-6) for m in means)
 
 
-def test_pitch_level_calibration_uses_its_own_spread_not_the_aggregates(make_raw_df, monkeypatch, tmp_path):
+def test_pitch_level_calibration_uses_its_own_spread_not_the_aggregates(
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, tmp_path
+):
     # Regression test for the aggregate-vs-pitch-level calibration mismatch:
     # location_run_value has much more spread at the pitch level than at the
     # (pitcher, pitch_type, season) aggregate level (an aggregate is a mean
@@ -48,12 +46,6 @@ def test_pitch_level_calibration_uses_its_own_spread_not_the_aggregates(make_raw
     # confirmed by checking loc_sigma_pitch > loc_sigma_agg here, and that
     # the pitch-level population (not just the aggregate one) also
     # calibrates to a mean of ~100 under its own dedicated calibration.
-    monkeypatch.setattr(stuff, "MIN_GROUP_SIZE_FOR_PCA", 50)
-    monkeypatch.setattr(stuff, "MIN_PITCHES_FOR_SCORE", 5)
-    monkeypatch.setattr(location, "MIN_GROUP_SIZE_FOR_MODEL", 50)
-    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SCORE", 5)
-    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SEASON_SCORE", 10)
-
     raw = make_raw_df(n_per_type=300, pitch_types=("FF", "SL"), n_pitchers=10)
     scored = location.add_location_plus(stuff.add_stuff_plus(raw), models_dir=tmp_path, retrain=True)
     in_scope = scored.dropna(subset=["pitch_stuff_plus", "stuff_plus", "location_run_value", "delta_pitcher_run_exp"])
@@ -77,15 +69,11 @@ def test_pitch_level_calibration_uses_its_own_spread_not_the_aggregates(make_raw
     assert all(m == pytest.approx(100.0, abs=1e-6) for m in means)
 
 
-def test_add_pitching_plus_reuses_precomputed_stuff_and_location_columns(make_raw_df, monkeypatch, tmp_path):
+def test_add_pitching_plus_reuses_precomputed_stuff_and_location_columns(
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, monkeypatch, tmp_path
+):
     # add_pitching_plus should not recompute stuff/location scores that are
     # already present -- full_pipeline.py relies on this to avoid redundant work.
-    monkeypatch.setattr(stuff, "MIN_GROUP_SIZE_FOR_PCA", 50)
-    monkeypatch.setattr(stuff, "MIN_PITCHES_FOR_SCORE", 5)
-    monkeypatch.setattr(location, "MIN_GROUP_SIZE_FOR_MODEL", 50)
-    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SCORE", 5)
-    monkeypatch.setattr(location, "MIN_PITCHES_FOR_SEASON_SCORE", 10)
-
     raw = make_raw_df(n_per_type=300, pitch_types=("FF",), n_pitchers=10)
     pre_scored = location.add_location_plus(stuff.add_stuff_plus(raw), models_dir=tmp_path, retrain=True)
 

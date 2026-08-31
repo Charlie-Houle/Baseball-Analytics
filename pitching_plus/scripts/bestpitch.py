@@ -98,6 +98,10 @@ BALL_DIAMETER_IN = 2.9
 TARGET_DIAMETER_BALLS = 3.0
 TARGET_RADIUS_FT = (TARGET_DIAMETER_BALLS * BALL_DIAMETER_IN / 2) / 12
 
+# LOCATION_FEATURES minus the three location-derived columns _predict_at_point
+# overwrites per candidate point -- everything else a row already has.
+NON_LOCATION_FEATURES = [c for c in LOCATION_FEATURES if c not in ("plate_x", "plate_z_rel", "plate_x_armside")]
+
 # NOTE: BASE_STATE_COLS (on_1b/on_2b/on_3b) is deliberately NOT folded into
 # REQUIRED_COLS -- NaN there means "base empty" (a real game state), not
 # missing data, exactly as in location.py. Must be present as columns, but
@@ -196,7 +200,6 @@ def _actual_smoothed_pitching_plus(engineered, models, zone_ref, blend_params, p
     """
 
     result = pd.Series(np.nan, index=engineered.index, dtype=float)
-    non_location_features = [c for c in LOCATION_FEATURES if c not in ("plate_x", "plate_z_rel", "plate_x_armside")]
 
     for ptype, model in models.items():
         rows = (engineered[PITCH_TYPE_COL] == ptype) & engineered[ZONE_COL].isin(zone_ref.index)
@@ -208,7 +211,7 @@ def _actual_smoothed_pitching_plus(engineered, models, zone_ref, blend_params, p
             zone_rows = base[base[ZONE_COL] == zone]
             ref_row = zone_ref.loc[zone]
             location_run_value_hyp = _target_averaged_location_run_value(
-                zone_rows, model, non_location_features, ref_row["plate_x"], ref_row["plate_z_rel"]
+                zone_rows, model, NON_LOCATION_FEATURES, ref_row["plate_x"], ref_row["plate_z_rel"]
             )
             score = pitching_mod._score_pitching_plus(
                 zone_rows["stuff_plus"].to_numpy(), location_run_value_hyp,
@@ -233,7 +236,6 @@ def _search_best_pitching_plus(engineered, models, zone_ref, blend_params, pitch
     """
 
     best = pd.Series(np.nan, index=engineered.index, dtype=float)
-    non_location_features = [c for c in LOCATION_FEATURES if c not in ("plate_x", "plate_z_rel", "plate_x_armside")]
 
     for ptype, model in models.items():
         cand_col = f"cand_stuff_{ptype}"
@@ -246,7 +248,7 @@ def _search_best_pitching_plus(engineered, models, zone_ref, blend_params, pitch
 
         for zone, ref_row in zone_ref.iterrows():
             location_run_value_hyp = _target_averaged_location_run_value(
-                base, model, non_location_features, ref_row["plate_x"], ref_row["plate_z_rel"]
+                base, model, NON_LOCATION_FEATURES, ref_row["plate_x"], ref_row["plate_z_rel"]
             )
             pitching_plus_hyp = pitching_mod._score_pitching_plus(
                 base[cand_col].to_numpy(), location_run_value_hyp,
