@@ -251,6 +251,160 @@
   discussion as the more principled direction for the actual Pitching+ build,
   vs. this notebook's regression-based weight as a reasonable starting point.
 
+# 8/27/2026 (cont'd): Pitching+ and bestPitch+ shipped
+- Ported the validated weighted-blend recipe into pitching_plus/pitching.py:
+  `add_pitching_plus(raw_df) -> raw_df`, mirroring stuff.py/location.py's
+  shape. One pooled WLS blend (z-scored log(stuff_plus) + mean
+  location_run_value against delta_pitcher_run_exp, weighted by n_pitches),
+  fit fresh on every call like stuff.py's PCA (cheap -- a few thousand
+  aggregate rows, no need for location.py's model-caching machinery). Applies
+  the same fitted weights at both the pitch level and the (pitcher,
+  pitch_type, season) aggregate level, then calibrates both to the 100+ ratio
+  scale via location.py's own `_ratio_calibration`/`_to_100_scale` (reused,
+  not reimplemented). Wired into full_pipeline.py after add_location_plus.
+  Ran end-to-end on the full 3,565,743-row dataset (chained with the existing
+  add_stuff_plus/add_location_plus): reliable-population calibration lands
+  exactly on 100 per (pitch_type, season) as designed; top of the leaderboard
+  (Treinen 2022 sinker 143.0, Murray 2025 sinker 141.3, Montero 2022 changeup
+  135.8) are plausible names/pitches, not small-sample noise.
+- Refactored pitching.py's internal blend fit into `_fit_pitching_plus_model`
+  (returns blend_params + the 100+ calibration table + pitcher_agg) and
+  `_score_pitching_plus` (pure function: applies an already-fitted
+  blend/calibration to arbitrary stuff/location inputs) -- needed so
+  bestpitch.py can score *hypothetical* pitches on the exact same fitted
+  scale as real ones, not a separately re-derived one. Confirmed via the
+  full pytest suite that add_pitching_plus's output is unchanged after the
+  refactor.
+- Built pitching_plus/bestpitch.py for purpose.md's last stage: "given
+  pitcher arsenal, calculate hypothetical Pitching+ score (bestPitch)" then
+  `bestPitch - Pitching+ = bestPitch+`. Design: for each in-scope pitch, hold
+  the real situation fixed (count, outs, base state, handedness) and search
+  every (candidate pitch type from that pitcher's own RELIABLE arsenal that
+  season x candidate zone) combination -- zones are Statcast's real `zone`
+  1-9 in-zone codes (purpose.md's "zone, not pinpoint"), represented by that
+  zone's dataset-wide average (plate_x, plate_z_rel), not a synthetic point
+  or a per-pitch-type-specific location (a pitch type's own typical spot
+  within a zone is a targeting choice the location model itself already
+  captures). Each candidate is scored by combining the pitcher's own real
+  stuff_plus for that pitch type with location.py's own cached model's
+  prediction for that zone (added `location.load_cached_models` to expose
+  the cache for this), run through pitching.py's `_score_pitching_plus` --
+  the identical fitted blend/calibration as real Pitching+ scores, so
+  "best" and "actual" are directly comparable. The max across all valid
+  candidates is `best_pitching_plus`.
+- Found and fixed a real scope-filtering bug while building this: initially
+  folded BASE_STATE_COLS (on_1b/on_2b/on_3b) into the dropna gate alongside
+  the rest of REQUIRED_COLS, which wrongly required all three bases occupied
+  to keep a row (NaN there is a real "base empty" state, per location.py's
+  own established convention) -- on a synthetic test fixture this dropped
+  ~98% of rows (19/900 scored) before the fix. Caught by smoke-testing
+  against the same synthetic fixture used for stuff.py/location.py's tests
+  before writing formal pytest cases; fixed by keeping BASE_STATE_COLS out of
+  the dropna subset, exactly mirroring location.py's own in-scope filtering.
+- Result on the same synthetic fixture (900 in-scope pitches, 3 pitch types,
+  10 pitchers): best_pitching_plus meets or exceeds the realized
+  pitch_pitching_plus for ~97.6% of pitches. The ~2.4% exceptions are
+  expected, not a bug: `best_pitching_plus` uses a *zone-average* location
+  for its candidates, so a real pitch placed unusually well within its own
+  zone can occasionally out-score the zone-average hypothetical for that
+  same zone.
+- bestPitch+ (`bestPitch - Pitching+`) is a maximum-over-candidates quantity,
+  so it's >= the realized value almost by construction -- positive or close
+  to 0, confirmed at ~97.6% non-negative on the synthetic fixture and ~99.1%
+  on the full 2021-2025 dataset. Corrected purpose.md's original draft note
+  (it had stated the opposite sign) and the bestpitch.py/bestpitch.ipynb text
+  to match.
+- Ran add_bestpitch_plus end-to-end on the full 3,565,743-row dataset
+  (against already-scored stuff/location/pitching columns, so this run only
+  paid the counterfactual search's own cost): 910s, 3,521,353 pitches scored.
+  Built notebooks/bestpitch.ipynb in the same style as the others -- scores
+  the full pipeline, sanity-checks the zone reference grid against Statcast's
+  real 1-9 layout, checks the bestPitch+ sign distribution, and a
+  pitcher-season "closest to optimal pitch selection" leaderboard (same
+  MIN_PITCHES_FOR_SEASON_SCORE reliability bar as location_plus's own
+  whole-arsenal score).
+- That leaderboard surfaced a real interpretive caveat: the closest-to-optimal
+  end sits in a plausible 72-84 range, but the most-room-for-improvement end
+  runs 780-1420 -- an order of magnitude larger, and concentrated in the 2024
+  season. best_pitching_plus is a max over ~(arsenal size x 9 zones)
+  candidates per pitch, and the underlying 100+ scale is unbounded above
+  (exp(k*z)) -- a max over that many candidates systematically favors
+  whichever pitcher-season happened to have one candidate land in the long
+  right tail, not a stable read on how much better their pitch selection
+  could realistically be. Documented in bestpitch.ipynb's synopsis rather
+  than treated as a bug; a bounded-candidate or trimmed-mean variant would be
+  the fix if this metric needs to support that specific claim later.
+- Added tests/test_pitching_plus.py coverage for both pitching.py (missing
+  columns, junk-type NaN, reliable-population calibration lands on exactly
+  100, and a check that add_pitching_plus reuses already-present
+  stuff/location columns instead of recomputing them) and bestpitch.py
+  (missing columns, junk-type NaN, best-meets-or-exceeds-actual on >90% of
+  in-scope pitches). Added a `zone` column to the shared synthetic fixture
+  (tests/conftest.py) via a rough 3x3 plate_x/plate_z_rel grid, matching
+  Statcast's real 1-9 numbering closely enough to exercise the zone-grid
+  logic (not intended to test real zone semantics).
+
+# 8/30/2026: bestPitch+ was inflated -- two real fixes, not one
+- User question ("is bestPitch's outcome really that much better than
+  average, and what defines the zone") led to actually checking the
+  magnitude rather than just the sign. Isolated the cause by re-running the
+  candidate search restricted to ONLY the pitch actually thrown (no
+  pitch-type switching, just its 9 in-zone locations) -- still produced a
+  mean gap of 90.8 (median 75.2), nearly as large as the full ~33-candidate
+  search's 127.4 (median 99.7). That ruled out "too many candidates" as the
+  main driver.
+- Root cause #1: pitching.py's blend z-scores location_run_value using
+  `loc_sigma` fit from the (pitcher, pitch_type, season) AGGREGATE
+  population's spread -- much narrower than a single pitch's natural spread,
+  since an aggregate is a mean over many pitches. Applying that narrow sigma
+  to pitch-level values inflates every pitch-level z-score, and taking a max
+  over several such over-wide draws compounds it further via order
+  statistics (max of 9 std~61 draws being ~60*1.5 above the mean is roughly
+  what was observed). Fixed by giving the location term a separate,
+  pitch-level-appropriate sigma (`loc_sigma_pitch`, computed from real
+  pitch-level location_run_value spread among reliable-arsenal pitches) and
+  its own from-scratch 100+ calibration (`pitch_calibration`, fit on the
+  pitch-level raw_pitching_value distribution itself, not borrowed from the
+  aggregate one). `_fit_pitching_plus_model` now returns both calibrations;
+  `_apply_blend`/`_score_pitching_plus` take an explicit `level` ("aggregate"
+  or "pitch") so callers can't accidentally cross the two. Stuff+'s
+  contribution needed no such split -- both levels already use the same
+  (pitcher, pitch_type, season) aggregate stuff_plus value, never a separate
+  pitch-level composite.
+- Root cause #2 (the user's own proposed fix, tested empirically before
+  committing to it): a single-point model query at each candidate zone's
+  reference location lets bestPitch+'s max-over-candidates search exploit
+  any local spike in the fitted regression surface. Averaging the
+  prediction over a small "target" area (5-point sample -- center + N/S/E/W
+  -- within a radius of 3 baseball-diameters, ~0.36ft) cut the same-pitch-
+  type-only mean gap from 90.8 to 52.2 (median 75.2 -> 43.7) on a 200k-row
+  sample, confirmed empirically before implementing at full scale.
+  TARGET_RADIUS_FT/CANDIDATE_ZONE_CODES are in bestpitch.py; the candidate
+  zone set was also widened from just the 9 in-strike-zone codes to include
+  Statcast's 4 chase/waste corners (11-14), since "up-and-in chase" is a
+  real pitch-location idea purpose.md's "zone, not pinpoint" should cover
+  and the original implementation excluded it entirely.
+- Combining both fixes overshot: bestPitch+ flipped to roughly symmetric
+  around 0 (mean -7.72, median -4.85, only 46.4% non-negative on the 200k
+  sample) instead of reliably non-negative. Root cause: `best_pitching_plus`
+  is now a *smoothed* (target-averaged) quantity, but it was still being
+  compared against the real `pitch_pitching_plus`, a *pinpoint* value -- an
+  apples-to-oranges comparison where a specific real pitch's own single-point
+  luck can beat a smoothed area estimate close to half the time.
+- Fixed (also the user's proposed design) by scoring the actual pitch's own
+  (pitch type, zone) combination through the identical target-averaging
+  machinery (`_actual_smoothed_pitching_plus`) before comparing, rather than
+  reusing pitch_pitching_plus for this comparison. Since that combination is
+  itself always one of the candidates the search considers, best_pitching_plus
+  is a true max over a set that includes it again. Result on the same
+  200k-row sample: 99.95% non-negative, mean 10.2, median 8.7, std 8.4, max
+  86.9 -- down from the original single-point version's mean 127.4/max
+  17,624 by roughly an order of magnitude, and now a believable "typical
+  achievable improvement" figure rather than a max-search artifact.
+  pitch_pitching_plus itself (the "real," reported metric used elsewhere) is
+  untouched by any of this -- the smoothed-actual value is computed
+  internally, used only for bestPitch+'s own comparison.
+
 # 8/31/2026: new branch, off main -- continuing the FanGraphs-joint-model check
 - New branch feat/pitching-plus-v2, off main (not off the prior
   feat/fangraphs-style-pitching branch, which drifted from investigating the
@@ -291,5 +445,11 @@
   blend is the validated choice for Pitching+, not a placeholder pending a
   better joint model -- two independent angles on "make the joint model
   competitive" (regularization, then input choice) both failed to close the
-  gap. Porting the prior branch's pitching.py/bestpitch.py (already built on
-  the weighted blend, already validated and bug-fixed) next.
+  gap. Ported the prior branch's pitching.py and bestpitch.py (see the
+  8/27-8/30 entries above for their construction/bug-fix history -- unchanged
+  here, since neither's design depended on which Pitching+ approach won) and
+  wired them into full_pipeline.py, along with their pytest coverage and
+  README's bestPitch+ description. Only location.py needed a real change:
+  added `load_cached_models` (bestpitch.py's dependency), which hadn't been
+  ported in the earlier infra pass since nothing needed it yet. Full suite
+  (18 tests, stuff/location/pitching/bestpitch) passes.

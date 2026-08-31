@@ -69,6 +69,15 @@ def _build_raw_df(
                 -0.05 * np.abs(plate_x) - 0.05 * np.abs(plate_z - 2.5) + noise
             )
 
+            # A rough 3x3 in-zone grid from plate_x/plate_z, matching
+            # Statcast's real 1-9 `zone` numbering closely enough for tests
+            # that exercise bestpitch.py's zone-grid logic (not testing zone
+            # semantics themselves).
+            plate_z_rel = (plate_z - sz_bot) / (sz_top - sz_bot)
+            zone_row = np.where(plate_z_rel > 2 / 3, 0, np.where(plate_z_rel > 1 / 3, 1, 2))
+            zone_col = np.where(plate_x < -0.28, 0, np.where(plate_x < 0.28, 1, 2))
+            zone = zone_row * 3 + zone_col + 1
+
             on_1b = np.where(rng.random(n) < 0.3, 1.0, np.nan)
             on_2b = np.where(rng.random(n) < 0.3, 1.0, np.nan)
             on_3b = np.where(rng.random(n) < 0.3, 1.0, np.nan)
@@ -101,6 +110,7 @@ def _build_raw_df(
                     "plate_z": plate_z,
                     "sz_top": sz_top,
                     "sz_bot": sz_bot,
+                    "zone": zone,
                     "on_1b": on_1b,
                     "on_2b": on_2b,
                     "on_3b": on_3b,
