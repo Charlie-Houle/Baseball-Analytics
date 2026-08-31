@@ -1,61 +1,61 @@
 """
 bestPitch+: per docs/purpose.md, "given pitcher arsenal ... calculate
 hypothetical Pitching+ score (bestPitch)" and compare it to the pitch actually
-thrown -- `bestPitch - Pitching+ = bestPitch+`, a decision-quality metric
+thrown: `bestPitch - Pitching+ = bestPitch+`, a decision-quality metric
 (was this the right pitch/location "idea"?), not another "stuff" metric.
 
 For each in-scope pitch, holds the real game situation fixed (count, outs,
-base state, batter/pitcher handedness -- everything but pitch type and
+base state, batter/pitcher handedness, everything but pitch type and
 location) and searches every combination of:
   - a candidate pitch type from that pitcher's own RELIABLE arsenal that
-    season (stuff_plus_reliable == True) -- never a pitch type they don't
+    season (stuff_plus_reliable == True), never a pitch type they don't
     actually throw.
   - a candidate zone, using Statcast's own `zone` 1-9 (in-strike) plus 11-14
-    (chase/waste corners just outside the zone -- real "up-and-in chase"
+    (chase/waste corners just outside the zone: real "up-and-in chase"
     type locations, not just heart-of-the-zone spots) as purpose.md's "zone,
-    not pinpoint" -- represented by that zone's dataset-wide average
+    not pinpoint", represented by that zone's dataset-wide average
     (plate_x, plate_z_rel), not a synthetic point.
 
 Each candidate's location quality is the model's prediction *averaged over a
 small "target" area* around that reference point (a 5-point sample within
-TARGET_RADIUS_FT, not a single pinpoint query) -- purpose.md's "zone, not
-pinpoint" taken literally: no pitcher hits an exact spot, and scoring only the
+TARGET_RADIUS_FT, not a single pinpoint query): purpose.md's "zone, not
+pinpoint" taken literally. No pitcher hits an exact spot, and scoring only the
 single reference point let bestPitch+'s max-over-candidates search exploit
 any local spike in the fitted regression surface, substantially inflating the
 result (see docs/dev_log.md). Combined with that pitcher's own real stuff_plus
 for the candidate pitch type, run through pitching.py's already-fitted blend +
-its pitch-level 100+ calibration (_score_pitching_plus, level="pitch") -- the
+its pitch-level 100+ calibration (_score_pitching_plus, level="pitch"), the
 exact same scale as the real pitch_pitching_plus, not a separately-derived
 one. The max over all candidates is `best_pitching_plus`.
 
 `best_pitching_plus` is scored with target-averaging (smoothed, area-based);
 the real `pitch_pitching_plus` is a pinpoint value (the pitch's own exact
 location, no averaging). Comparing a smoothed quantity against a pinpoint one
-directly is an apples-to-oranges comparison -- a specific real pitch can
+directly is an apples-to-oranges comparison: a specific real pitch can
 easily beat a smoothed area estimate just from its own single-point noise,
 which showed up empirically as bestPitch+ losing its expected sign (see
 docs/dev_log.md). Fixed by scoring the actual pitch's own (pitch type, zone)
 combination through the *identical* target-averaging machinery
-(`_actual_smoothed_pitching_plus`) before comparing -- since that
+(`_actual_smoothed_pitching_plus`) before comparing. Since that
 combination is itself always one of the candidates the search considers,
 `best_pitching_plus` is a true max over a set that includes it, restoring
 `best_pitching_plus >= actual (smoothed)` as an (almost) guaranteed property.
 
 Public entry point is `add_bestpitch_plus`, which takes a raw Statcast
 dataframe and returns it with:
-  - `best_pitching_plus`   -- best achievable Pitching+ (100+, target-averaged)
-                               from this pitcher's own arsenal/zone options,
-                               same situation as the actual pitch.
-  - `pitch_bestpitch_plus` -- best_pitching_plus minus the actual pitch's own
-                               (pitch type, zone) scored the same
-                               target-averaged way; positive or close to 0 for
-                               nearly every pitch, since the actual
-                               combination is always one of the candidates
-                               considered (see notebooks/bestpitch.ipynb).
+  - `best_pitching_plus`   : best achievable Pitching+ (100+, target-averaged)
+                             from this pitcher's own arsenal/zone options,
+                             same situation as the actual pitch.
+  - `pitch_bestpitch_plus` : best_pitching_plus minus the actual pitch's own
+                             (pitch type, zone) scored the same
+                             target-averaged way; positive or close to 0 for
+                             nearly every pitch, since the actual
+                             combination is always one of the candidates
+                             considered (see notebooks/bestpitch.ipynb).
 
 Calls add_stuff_plus/add_location_plus/add_pitching_plus itself if their
 columns aren't already present. Requires a cached Location+ model (via
-location.load_cached_models) -- run add_location_plus at least once first.
+location.load_cached_models); run add_location_plus at least once first.
 """
 
 import numpy as np
@@ -91,7 +91,7 @@ ZONE_COL = "zone"
 CANDIDATE_ZONE_CODES = list(range(1, 10)) + [11, 12, 13, 14]
 
 # "Target" radius for averaging a candidate zone's location prediction over a
-# small area rather than a single pinpoint -- purpose.md's "zone, not
+# small area rather than a single pinpoint. purpose.md's "zone, not
 # pinpoint," and no pitcher hits an exact spot. ~3 baseballs across (a
 # baseball is ~2.9 inches in diameter).
 BALL_DIAMETER_IN = 2.9
@@ -99,11 +99,11 @@ TARGET_DIAMETER_BALLS = 3.0
 TARGET_RADIUS_FT = (TARGET_DIAMETER_BALLS * BALL_DIAMETER_IN / 2) / 12
 
 # LOCATION_FEATURES minus the three location-derived columns _predict_at_point
-# overwrites per candidate point -- everything else a row already has.
+# overwrites per candidate point; everything else a row already has.
 NON_LOCATION_FEATURES = [c for c in LOCATION_FEATURES if c not in ("plate_x", "plate_z_rel", "plate_x_armside")]
 
 # NOTE: BASE_STATE_COLS (on_1b/on_2b/on_3b) is deliberately NOT folded into
-# REQUIRED_COLS -- NaN there means "base empty" (a real game state), not
+# REQUIRED_COLS. NaN there means "base empty" (a real game state), not
 # missing data, exactly as in location.py. Must be present as columns, but
 # not dropna-gated.
 REQUIRED_COLS = LOCATION_REQUIRED_COLS + [ZONE_COL]
@@ -115,7 +115,7 @@ REQUIRED_COLS = LOCATION_REQUIRED_COLS + [ZONE_COL]
 
 def _zone_reference(engineered):
     """
-    Dataset-wide average (plate_x, plate_z_rel) per candidate `zone` code --
+    Dataset-wide average (plate_x, plate_z_rel) per candidate `zone` code:
     purpose.md's "zone, not pinpoint" representative location, pooled across
     all pitch types/seasons rather than per-pitch-type (a pitch type's own
     typical spot within a zone is a targeting choice already captured by
@@ -137,7 +137,7 @@ def _zone_reference(engineered):
 def _arsenal_wide(df):
     """
     One row per (pitcher, season), one column per candidate pitch type
-    (`cand_stuff_<type>`) holding that pitcher's own real stuff_plus for it --
+    (`cand_stuff_<type>`) holding that pitcher's own real stuff_plus for it,
     NaN wherever that pitch type isn't a reliable part of their arsenal that
     season (stuff_plus_reliable == True), so it's automatically excluded from
     the candidate search rather than needing a separate mask.
@@ -169,7 +169,7 @@ def _target_averaged_location_run_value(base, model, non_location_features, cent
     """
     Averages the model's location_run_value prediction over a 5-point
     "target" (center + N/S/E/W at TARGET_RADIUS_FT) around (center_x,
-    center_z_rel), instead of querying the single reference point -- see
+    center_z_rel), instead of querying the single reference point. See
     module docstring for why. The z-offset is converted from physical feet
     to plate_z_rel units per row, since strike zone height varies by batter.
     """
@@ -192,7 +192,7 @@ def _actual_smoothed_pitching_plus(engineered, models, zone_ref, blend_params, p
     """
     Scores each pitch's own (actual pitch type, actual zone) combination
     through the identical target-averaging machinery as the candidate
-    search -- so bestPitch+'s comparison is smoothed-vs-smoothed, not
+    search, so bestPitch+'s comparison is smoothed-vs-smoothed, not
     smoothed-vs-pinpoint (see module docstring). Pitches whose own zone
     isn't one of CANDIDATE_ZONE_CODES, or whose own pitch type has no
     trained model, get NaN (excluded from bestPitch+ entirely, same as any
@@ -229,7 +229,7 @@ def _search_best_pitching_plus(engineered, models, zone_ref, blend_params, pitch
     pair, scores the whole in-scope population at once (vectorized model
     .predict(), averaged over each zone's target area), restricted to rows
     where that pitch type is actually in the row's own pitcher-season
-    arsenal. Returns the running max across all candidates --
+    arsenal. Returns the running max across all candidates,
     `best_pitching_plus`, aligned to engineered's index. Uses `pitch_calibration`
     (not `calibration`) since every candidate here is a single-pitch score,
     same as the real pitch_pitching_plus it's compared against.

@@ -42,7 +42,7 @@ def test_pitch_level_calibration_uses_its_own_spread_not_the_aggregates(
     # location_run_value has much more spread at the pitch level than at the
     # (pitcher, pitch_type, season) aggregate level (an aggregate is a mean
     # over many pitches). Using the aggregate's spread to z-score pitch-level
-    # values would inflate every pitch-level score's distance from 100 --
+    # values would inflate every pitch-level score's distance from 100;
     # confirmed by checking loc_sigma_pitch > loc_sigma_agg here, and that
     # the pitch-level population (not just the aggregate one) also
     # calibrates to a mean of ~100 under its own dedicated calibration.
@@ -73,7 +73,7 @@ def test_add_pitching_plus_reuses_precomputed_stuff_and_location_columns(
     make_raw_df, small_stuff_thresholds, small_location_thresholds, monkeypatch, tmp_path
 ):
     # add_pitching_plus should not recompute stuff/location scores that are
-    # already present -- full_pipeline.py relies on this to avoid redundant work.
+    # already present; full_pipeline.py relies on this to avoid redundant work.
     raw = make_raw_df(n_per_type=300, pitch_types=("FF",), n_pitchers=10)
     pre_scored = location.add_location_plus(stuff.add_stuff_plus(raw), models_dir=tmp_path, retrain=True)
 

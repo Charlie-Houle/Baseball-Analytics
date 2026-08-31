@@ -1,6 +1,6 @@
 """
 Stuff+: a standardized physics "outlierness" index for individual pitches,
-not a trained model (see docs/purpose.md) -- no outcome data involved.
+not a trained model (see docs/purpose.md); no outcome data involved.
 
 Public entry point is `add_stuff_plus`, which takes a raw Statcast dataframe
 (as loaded by data/load_data.py) and returns it with `pitch_stuff_plus`
@@ -10,7 +10,7 @@ added. Row count and order are unchanged; pitches out of scope (junk pitch
 types, incomplete physics data, or pitch types too rare to calibrate) get
 NaN in the new columns.
 
-Ported from notebooks/stuff.ipynb -- see that notebook and docs/dev_log.md for
+Ported from notebooks/stuff.ipynb. See that notebook and docs/dev_log.md for
 the exploration behind these choices, including why the V2 arsenal-comparison
 features (pairwise "_vs_" columns) are NOT used here: they don't change
 Stuff+ rankings meaningfully (Spearman rho 0.998 overall, checked against
@@ -56,7 +56,7 @@ TRAJ_DISTANCES = [10, 20, 30, 40]
 
 # Features that go into the per-pitch PCA composite. Deduped to avoid
 # redundant features inflating PCA weights (e.g. reaction time is r=0.99
-# with velocity) -- see docs/dev_log.md 8/26 entry.
+# with velocity); see docs/dev_log.md 8/26 entry.
 STUFF_FEATURES = [
     "release_speed",
     "release_spin_rate",
@@ -176,7 +176,7 @@ def _build_v1_features(df):
         df[f"time_{distance}ft"] = t
 
     # "Reaction x Movement": how much the ball deviates within the reaction
-    # window available -- purpose.md's explicit concept, and the single
+    # window available (purpose.md's explicit concept), and the single
     # highest-loading PC1 feature across every pitch type.
     df["movement_per_reaction_time"] = df["horizontal_acceleration"] / df["time_30ft"]
 
@@ -195,9 +195,9 @@ def _score_stuff_plus(df):
     so the league average for that pitch type/season is exactly 100).
 
     Returns (stuff_df, pitcher_agg):
-      stuff_df    -- one row per in-scope pitch, with pitch_stuff_plus.
-      pitcher_agg -- one row per (pitcher, pitch_type, season), with
-                     stuff_plus and a `reliable` flag (>= MIN_PITCHES_FOR_SCORE).
+      stuff_df    : one row per in-scope pitch, with pitch_stuff_plus.
+      pitcher_agg : one row per (pitcher, pitch_type, season), with
+                    stuff_plus and a `reliable` flag (>= MIN_PITCHES_FOR_SCORE).
     """
 
     stuff_df = df[np.isfinite(df["movement_per_reaction_time"])].copy()
@@ -213,7 +213,7 @@ def _score_stuff_plus(df):
         season_sigma = type_group.groupby(SEASON_COL)[STUFF_FEATURES].transform("std")
         Z = (type_group[STUFF_FEATURES] - season_mu) / season_sigma
 
-        # PCA weights fit pooled across seasons -- more stable than fitting per season
+        # PCA weights fit pooled across seasons: more stable than fitting per season
         pca = PCA(n_components=len(STUFF_FEATURES))
         pca.fit(Z.to_numpy())
 
@@ -223,7 +223,7 @@ def _score_stuff_plus(df):
 
         stuff_df.loc[type_group.index, "pitch_composite"] = Z.to_numpy() @ loadings
 
-    # Aggregate to (pitcher, pitch_type, season) -- Stuff+ is reported at
+    # Aggregate to (pitcher, pitch_type, season). Stuff+ is reported at
     # this level, matching how real "+" stats (wRC+, ERA-) work.
     pitcher_agg = (
         stuff_df
@@ -233,7 +233,7 @@ def _score_stuff_plus(df):
         .reset_index()
     )
 
-    # Only "reliable" (large enough sample) pitcher-seasons set the reference --
+    # Only "reliable" (large enough sample) pitcher-seasons set the reference:
     # a tiny sample's own mean is noisy and would distort the league average/SD.
     reliable = pitcher_agg[pitcher_agg["n_pitches"] >= MIN_PITCHES_FOR_SCORE].copy()
 
@@ -247,7 +247,7 @@ def _score_stuff_plus(df):
     reliable["agg_z"] = (reliable["mean_composite"] - reliable["agg_mu"]) / reliable["agg_sigma"]
     reliable["raw_ratio"] = np.exp(STUFF_SCALE_K * reliable["agg_z"])
 
-    # raw_ratio_mean anchors the scale to exactly 100 -- computed from the SAME
+    # raw_ratio_mean anchors the scale to exactly 100, computed from the SAME
     # reliable pitcher-seasons only, so unreliable small samples can't skew it.
     raw_ratio_mean = (
         reliable
@@ -258,7 +258,7 @@ def _score_stuff_plus(df):
     )
     calibration = calibration.merge(raw_ratio_mean, on=[PITCH_TYPE_COL, SEASON_COL], how="left")
 
-    # Apply the same calibration to both levels -- shared scale, shared "100".
+    # Apply the same calibration to both levels: shared scale, shared "100".
     pitcher_agg = pitcher_agg.merge(calibration, on=[PITCH_TYPE_COL, SEASON_COL], how="left")
     pitcher_agg["stuff_plus"] = 100 * np.exp(
         STUFF_SCALE_K * (pitcher_agg["mean_composite"] - pitcher_agg["agg_mu"]) / pitcher_agg["agg_sigma"]
@@ -266,7 +266,7 @@ def _score_stuff_plus(df):
     pitcher_agg["reliable"] = pitcher_agg["n_pitches"] >= MIN_PITCHES_FOR_SCORE
 
     # merge() resets the index, but add_stuff_plus reattaches pitch_stuff_plus to
-    # `result` positionally via stuff_df.index -- restore it (left merge on a
+    # `result` positionally via stuff_df.index. Restore it (left merge on a
     # unique key preserves row order, so this is a straight relabel, not a
     # reshuffle).
     original_index = stuff_df.index
@@ -296,8 +296,8 @@ def add_stuff_plus(raw_df):
     if missing:
         raise ValueError(f"raw_df is missing required columns: {missing}")
 
-    # Select only the columns feature engineering needs before filtering rows
-    # -- raw_df has ~119 Statcast columns, and carrying all of them through
+    # Select only the columns feature engineering needs before filtering rows.
+    # raw_df has ~119 Statcast columns, and carrying all of them through
     # every intermediate step (rather than just REQUIRED_COLS) multiplies
     # peak memory many times over for no benefit, since only pitch_stuff_plus
     # gets reattached to raw_df at the end anyway.

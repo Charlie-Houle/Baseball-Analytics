@@ -12,8 +12,8 @@ Create "+" style model that scores on following fronts:
 - With constant movement/velocity, higher velocity/movement should score a pitch higher
 - Reaction time: calculate time (with extension) for ball to travel to home plate
 - Reaction x Movement: how much ball deviates in given reaction time
-- Importantly: 105 Stuff+ fastball is not necessarily "better" than 100 Stuff+ curveball
-- Built from a pitch's own physics only -- does not compare a pitch against the pitcher's other pitch types (e.g. changeup velocity diff to primary fastball)
+- A 105 Stuff+ fastball is not necessarily "better" than a 100 Stuff+ curveball
+- Built from a pitch's own physics only. Does not compare a pitch against the pitcher's other pitch types (e.g. changeup velocity diff to primary fastball)
 - Aggregated to pitch type
 
 #### Location+: 
@@ -31,7 +31,7 @@ Create "+" style model that scores on following fronts:
 - Given pitcher arsenal (using avg. Stuff+ and Location+ from spot), calculate hypothetical Pitching+ score (bestPitch)
 - Identify if pitch "idea" was good (right pitch type/location)
 - bestPitch - Pitching+ = bestPitch+ 
-- bestPitch is a max over real candidate pitches, and the actual pitch is one of those candidates -- so bestPitch+ should be positive or close to 0
+- bestPitch is a max over real candidate pitches, and the actual pitch is one of those candidates, so bestPitch+ should be positive or close to 0
 
 ### Planned Workflow
 1. Stuff+: Calculate Stuff+ figures for each pitch type

@@ -8,28 +8,28 @@ notebooks/pitching.ipynb found the blend a real, generalizing (season-holdout
 validated) relationship, and notebooks/fg_pitching.ipynb head-to-head compared
 it against FanGraphs' actual approach (one HistGradientBoostingRegressor per
 pitch type on the combined feature set) on a strict 2021-2024-train/2025-test
-split -- the blend generalized better (holdout R^2 0.052 vs. 0.039). Neither
+split. The blend generalized better (holdout R^2 0.052 vs. 0.039). Neither
 regularizing the joint model harder nor feeding it the blend's own calibrated
-inputs (instead of raw physics/location features) closed the gap -- the
+inputs (instead of raw physics/location features) closed the gap. The
 second actually made it worse (holdout R^2 0.034). See docs/dev_log.md's
 8/26 and 8/31 entries for the full derivation.
 
 Public entry point is `add_pitching_plus`, which takes a raw Statcast
 dataframe and returns it with:
-  - `pitch_pitching_plus` -- pitch-level, 100+ scaled (per pitch_type/season)
-  - `pitching_plus`       -- pitcher x pitch_type x season aggregate, 100+
-                             scaled (the headline figure, matching Stuff+'s
-                             per-pitch-type reporting level)
-  - `pitching_plus_reliable` -- whether that pitcher-pitch-type-season met
-                                 the MIN_PITCHES_FOR_SCORE bar
+  - `pitch_pitching_plus` : pitch-level, 100+ scaled (per pitch_type/season)
+  - `pitching_plus`       : pitcher x pitch_type x season aggregate, 100+
+                            scaled (the headline figure, matching Stuff+'s
+                            per-pitch-type reporting level)
+  - `pitching_plus_reliable` : whether that pitcher-pitch-type-season met
+                               the MIN_PITCHES_FOR_SCORE bar
 
 Calls add_stuff_plus/add_location_plus itself if their columns aren't already
 present, so it can run standalone; full_pipeline.py's existing stuff+location
 calls are reused as-is (no recomputation) when chained together.
 
 The blend weights (an intercept and two z-scored slopes on log(Stuff+) and
-mean Location+ run value) are fit fresh on every call via WLS -- like
-stuff.py's PCA, this is cheap enough (a few thousand aggregate rows) not to
+mean Location+ run value) are fit fresh on every call via WLS, like
+stuff.py's PCA. This is cheap enough (a few thousand aggregate rows) not to
 need location.py's model-caching machinery.
 """
 
@@ -57,22 +57,22 @@ PITCHING_SCALE_K = 0.10
 # BLEND: FIT WEIGHTS, SCORE BOTH LEVELS
 #
 # Split into a fit step (_fit_pitching_plus_model) and a pure scoring step
-# (_score_pitching_plus) -- not just for add_pitching_plus's own two levels,
+# (_score_pitching_plus). Not just for add_pitching_plus's own two levels,
 # but so bestpitch.py can score *hypothetical* (pitch_type, location)
 # combinations on the exact same fitted blend/calibration, not a re-derived
 # one.
 #
 # The WLS regression itself is fit once, on the (pitcher, pitch_type, season)
-# AGGREGATE population -- but Location+'s raw input (location_run_value) has
+# AGGREGATE population, but Location+'s raw input (location_run_value) has
 # very different natural spread at the two levels: an aggregate is a mean over
 # many pitches (low variance), a single pitch's value isn't (much higher
 # variance). Using the aggregate's spread to z-score pitch-level values would
 # inflate every pitch-level z-score, and therefore every pitch-level score's
-# distance from 100 -- which compounds badly for bestpitch.py, since taking a
+# distance from 100, which compounds badly for bestpitch.py, since taking a
 # max over several such over-wide pitch-level scores biases the max even
 # further upward (order statistics). So the location term gets its own
 # level-appropriate sigma (`loc_sigma_agg` vs. `loc_sigma_pitch`) and its own
-# 100+ calibration per level (`calibration` vs. `pitch_calibration`) -- same
+# 100+ calibration per level (`calibration` vs. `pitch_calibration`), same
 # regression coefficients and the same `loc_mu`, just scaled correctly for
 # what's actually being scored. Stuff+'s contribution needs no such split:
 # both levels already use the same (pitcher, pitch_type, season) aggregate
@@ -91,7 +91,7 @@ def _apply_blend(mean_stuff_plus, location_run_value, blend_params, level):
 
 def _fit_pitching_plus_model(df):
     """
-    Fits one pooled WLS blend (not per pitch type -- notebooks/pitching.ipynb
+    Fits one pooled WLS blend (not per pitch type: notebooks/pitching.ipynb
     confirmed the same relationship holds within every pitch type individually,
     so pooling is a stability choice, not a pattern-hiding one) of z-scored
     log(stuff_plus) and mean location_run_value against realized run value, on
@@ -100,19 +100,19 @@ def _fit_pitching_plus_model(df):
     docstring for why they need separate ones).
 
     Returns (blend_params, calibration, pitch_calibration, pitcher_agg):
-      blend_params      -- dict of fitted WLS coefficients + z-scoring
-                            mu/sigma (both levels), sufficient to score any
-                            (mean_stuff_plus, location_run_value) pair, real
-                            or hypothetical, at either level.
-      calibration        -- per (pitch_type, season) 100+ scale reference for
-                             AGGREGATE-level raw_pitching_value.
-      pitch_calibration  -- per (pitch_type, season) 100+ scale reference for
-                             PITCH-level raw_pitching_value, fit on its own
-                             (wider) distribution rather than borrowing the
-                             aggregate one.
-      pitcher_agg        -- one row per (pitcher, pitch_type, season), with
-                             raw_pitching_value/pitching_plus and a `reliable`
-                             flag.
+      blend_params      : dict of fitted WLS coefficients + z-scoring
+                           mu/sigma (both levels), sufficient to score any
+                           (mean_stuff_plus, location_run_value) pair, real
+                           or hypothetical, at either level.
+      calibration       : per (pitch_type, season) 100+ scale reference for
+                           AGGREGATE-level raw_pitching_value.
+      pitch_calibration : per (pitch_type, season) 100+ scale reference for
+                           PITCH-level raw_pitching_value, fit on its own
+                           (wider) distribution rather than borrowing the
+                           aggregate one.
+      pitcher_agg       : one row per (pitcher, pitch_type, season), with
+                          raw_pitching_value/pitching_plus and a `reliable`
+                          flag.
     """
 
     pitcher_agg = (
@@ -151,7 +151,7 @@ def _fit_pitching_plus_model(df):
 
     # Pitch-level sigma for the location term: the natural spread of raw,
     # per-pitch location_run_value among pitches belonging to a reliable
-    # (pitcher, pitch_type, season) -- NOT the spread of that group's own
+    # (pitcher, pitch_type, season), NOT the spread of that group's own
     # mean (blend_params["loc_sigma_agg"] above), which is far narrower.
     reliable_keys = reliable[[PITCHER_COL, PITCH_TYPE_COL, SEASON_COL]]
     df_reliable = df.merge(reliable_keys, on=[PITCHER_COL, PITCH_TYPE_COL, SEASON_COL], how="inner")
@@ -181,8 +181,8 @@ def _fit_pitching_plus_model(df):
 def _score_pitching_plus(mean_stuff_plus, location_run_value, pitch_type, season, blend_params, calibration, level):
     """
     Applies an already-fitted blend + 100+ calibration to arbitrary
-    (mean_stuff_plus, location_run_value) inputs -- real or hypothetical
-    (e.g. bestpitch.py's counterfactual pitch-type/zone combinations) --
+    (mean_stuff_plus, location_run_value) inputs, real or hypothetical
+    (e.g. bestpitch.py's counterfactual pitch-type/zone combinations),
     keyed by pitch_type/season for calibration lookup. `level` must be
     "aggregate" or "pitch" and must match what `calibration` was fit for
     (pitcher_agg-level scoring needs `calibration`; single-pitch scoring,

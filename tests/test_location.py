@@ -67,7 +67,7 @@ def test_add_location_plus_missing_columns_raises():
 
 
 def test_add_location_plus_row_alignment_and_scope(make_raw_df, small_location_thresholds, tmp_path):
-    # Same class of index-alignment regression as stuff.py's equivalent test --
+    # Same class of index-alignment regression as stuff.py's equivalent test;
     # `_calibrate` had (and dev_log.md 8/26 fixed) the identical bug.
     raw = make_raw_df(
         n_per_type=300, pitch_types=("FF",), junk_pitch_types=("KN",),
@@ -76,7 +76,7 @@ def test_add_location_plus_row_alignment_and_scope(make_raw_df, small_location_t
     result = location.add_location_plus(raw, models_dir=tmp_path, retrain=True)
 
     # Same note as stuff.py's equivalent test: the final merge resets the
-    # index to a fresh RangeIndex -- row count/order is the actual contract.
+    # index to a fresh RangeIndex; row count/order is the actual contract.
     assert len(result) == len(raw)
     np.testing.assert_array_equal(result["plate_x"].to_numpy(), raw["plate_x"].to_numpy())
 
@@ -85,7 +85,7 @@ def test_add_location_plus_row_alignment_and_scope(make_raw_df, small_location_t
     assert result.loc[junk_rows, "location_run_value"].isna().all()
 
     # Pitches closer to the plate center (lower |plate_x|) were constructed
-    # to have higher expected run value for the pitcher -- the model should
+    # to have higher expected run value for the pitcher; the model should
     # recover a real (negative) relationship, not noise.
     scored = result.dropna(subset=["location_run_value"])
     assert scored["plate_x"].abs().corr(scored["location_run_value"]) < -0.1

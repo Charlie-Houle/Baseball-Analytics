@@ -28,7 +28,7 @@ def test_add_bestpitch_plus_junk_and_best_meets_or_exceeds_actual(
     assert len(in_scope) > 0
     # best_pitching_plus is a max over real candidates including (usually) the
     # pitcher's own actual pitch type/zone, so it should meet or exceed the
-    # realized pitch_pitching_plus for the large majority of pitches -- not
+    # realized pitch_pitching_plus for the large majority of pitches, not
     # all, since the candidate uses a zone-average location while the actual
     # pitch's own precise spot within its zone can occasionally beat it.
     assert (in_scope["pitch_bestpitch_plus"] >= -1e-6).mean() > 0.9

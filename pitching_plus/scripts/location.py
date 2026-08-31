@@ -1,24 +1,24 @@
 """
 Location+: an actual trained model (unlike Stuff+, a standardized index with
 no outcome data) that predicts a pitch's expected run value from where/when
-it was thrown -- pitch type, location (batter-zone-relative, arm-side-
+it was thrown: pitch type, location (batter-zone-relative, arm-side-
 adjusted), RE288 situation (base-out state x count), and handedness. See
 pitching_plus/notebooks/location.ipynb for the full derivation and validation.
 
 Public entry point is `add_location_plus`, which takes a raw Statcast
 dataframe and returns it with:
-  - `location_run_value`     -- pitch-level expected run value (runs),
-                                 positive favors the pitcher
-  - `pitch_location_plus`    -- pitch-level, 100+ scaled (per pitch_type/season)
-  - `location_plus`          -- pitcher x season aggregate across the WHOLE
-                                 arsenal, 100+ scaled. This is the "final"
-                                 command score, not the per-pitch-type
-                                 breakdown -- a pitcher's Location+ for one
-                                 pitch type off a handful of pitches is too
-                                 easily dominated by a small sample (see
-                                 docs/dev_log.md 8/26).
-  - `location_plus_reliable` -- whether that pitcher-season met the season
-                                 pitch-count bar (>= MIN_PITCHES_FOR_SEASON_SCORE)
+  - `location_run_value`     : pitch-level expected run value (runs),
+                                positive favors the pitcher
+  - `pitch_location_plus`    : pitch-level, 100+ scaled (per pitch_type/season)
+  - `location_plus`          : pitcher x season aggregate across the WHOLE
+                                arsenal, 100+ scaled. This is the "final"
+                                command score, not the per-pitch-type
+                                breakdown. A pitcher's Location+ for one
+                                pitch type off a handful of pitches is too
+                                easily dominated by a small sample (see
+                                docs/dev_log.md 8/26).
+  - `location_plus_reliable` : whether that pitcher-season met the season
+                                pitch-count bar (>= MIN_PITCHES_FOR_SEASON_SCORE)
 
 Training the per-pitch-type gradient-boosted models with 5-fold
 cross-validation is the expensive step (minutes on the full 2021-2025 data),
@@ -53,7 +53,7 @@ except ImportError:
 
 PLAYER_NAME_COL = "player_name"
 
-# Uniquely identifies a single pitch -- used to reattach cached out-of-fold
+# Uniquely identifies a single pitch, used to reattach cached out-of-fold
 # historical scores to a freshly loaded raw dataframe without retraining.
 KEY_COLS = ["game_pk", "at_bat_number", "pitch_number"]
 
@@ -64,7 +64,7 @@ REQUIRED_COLS = [
     "delta_pitcher_run_exp",
 ] + KEY_COLS
 
-# Must be present, but NOT required to be non-null -- NaN here means "base
+# Must be present, but NOT required to be non-null. NaN here means "base
 # empty," a real game state, not a missing-data problem, so these are checked
 # separately from REQUIRED_COLS (which gates the dropna below).
 BASE_STATE_COLS = ["on_1b", "on_2b", "on_3b"]
@@ -85,7 +85,7 @@ N_FOLDS = 5
 LOCATION_SCALE_K = 0.10
 
 # Season-overall reliability needs a much bigger sample than the per-pitch-type
-# gate (MIN_PITCHES_FOR_SCORE) -- a few dozen pitches total in a season is too
+# gate (MIN_PITCHES_FOR_SCORE): a few dozen pitches total in a season is too
 # thin to call a real read on a pitcher's command.
 MIN_PITCHES_FOR_SEASON_SCORE = 100
 
@@ -130,20 +130,20 @@ def _build_features(df):
 
 
 # ============================================================
-# MODEL TRAINING (expensive -- cached)
+# MODEL TRAINING (expensive, cached)
 # ============================================================
 
 def _train_models(df):
     """
     Fits one gradient-boosted regressor per pitch type. Returns:
-      models             -- {pitch_type: fitted HistGradientBoostingRegressor},
-                             fit on ALL in-scope rows for that type (used to
-                             score pitches outside this training set later).
-      historical_scores  -- KEY_COLS + location_run_value for every in-scope
-                             row, using out-of-fold (5-fold CV) predictions --
-                             NOT the final model's own fit -- so a pitch's
-                             "expected" value never leaks its own realized
-                             outcome.
+      models             : {pitch_type: fitted HistGradientBoostingRegressor},
+                            fit on ALL in-scope rows for that type (used to
+                            score pitches outside this training set later).
+      historical_scores  : KEY_COLS + location_run_value for every in-scope
+                            row, using out-of-fold (5-fold CV) predictions,
+                            NOT the final model's own fit, so a pitch's
+                            "expected" value never leaks its own realized
+                            outcome.
     """
 
     models = {}
@@ -181,7 +181,7 @@ def _train_models(df):
 def load_cached_models(models_dir=DEFAULT_MODELS_DIR):
     """
     Loads just the cached per-pitch-type models (no scoring), for callers that
-    need to score counterfactual inputs directly -- e.g. bestpitch.py scoring
+    need to score counterfactual inputs directly, e.g. bestpitch.py scoring
     hypothetical (pitch_type, location) combinations a pitcher never actually
     threw. Raises FileNotFoundError with a clear message if the cache doesn't
     exist yet (run add_location_plus, or `python location.py --retrain`, first).
@@ -214,7 +214,7 @@ def _load_or_score(engineered, models_dir, retrain):
     scored.index = engineered.index
 
     # Pitches not found in the historical cache (e.g. new data since the
-    # models were last trained) fall back to direct model scoring -- the
+    # models were last trained) fall back to direct model scoring. The
     # normal, correct thing to do for a pitch the model hasn't seen before.
     missing = scored["location_run_value"].isna()
     for ptype, model in models.items():
@@ -233,7 +233,7 @@ def _load_or_score(engineered, models_dir, retrain):
 def _ratio_calibration(reliable, group_cols, value_col):
     """
     league reference (agg_mu, agg_sigma) plus the ratio-mean anchor, computed
-    only from the reliable rows -- same genuine-ratio-scale approach as
+    only from the reliable rows, same genuine-ratio-scale approach as
     Stuff+ (100 * exp(k*z), renormalized so the reliable population's mean is
     exactly 100).
     """
@@ -276,7 +276,7 @@ def _calibrate(scored):
     type_calibration = _ratio_calibration(reliable_type, [PITCH_TYPE_COL, SEASON_COL], "mean_location_value")
 
     # merge() resets the index, but add_location_plus reattaches this frame's
-    # columns to `result` positionally via has_score.index -- restore it (left
+    # columns to `result` positionally via has_score.index. Restore it (left
     # merge on a unique key preserves row order, so this is a straight
     # relabel, not a reshuffle).
     original_index = has_score.index
@@ -320,7 +320,7 @@ def add_location_plus(raw_df, models_dir=DEFAULT_MODELS_DIR, retrain=False):
         raise ValueError(f"raw_df is missing required columns: {missing}")
 
     # Select only the columns feature engineering/scoring needs before
-    # filtering rows -- raw_df has ~119 Statcast columns, and carrying all of
+    # filtering rows. raw_df has ~119 Statcast columns, and carrying all of
     # them through every intermediate step (rather than just REQUIRED_COLS +
     # BASE_STATE_COLS) multiplies peak memory many times over for no benefit,
     # since only the four new columns get reattached to raw_df at the end.

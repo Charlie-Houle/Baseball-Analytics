@@ -10,7 +10,7 @@ production-sized (5000+) row counts.
 
 `small_stuff_thresholds`/`small_location_thresholds` lower those (and
 MIN_PITCHES_FOR_SCORE/MIN_PITCHES_FOR_SEASON_SCORE) to values this fixture's
-row counts can actually satisfy -- request whichever module(s) a test scores.
+row counts can actually satisfy; request whichever module(s) a test scores.
 """
 
 import numpy as np
