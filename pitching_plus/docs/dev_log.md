@@ -406,10 +406,26 @@
   internally, used only for bestPitch+'s own comparison.
 
 # 8/31/2026: new branch, off main -- continuing the FanGraphs-joint-model check
-- New branch feat/pitching-plus-v2, off main (not off the prior
-  feat/fangraphs-style-pitching branch, which drifted from investigating the
-  joint model into shipping Pitching+/bestPitch+ as production code before
-  that investigation was actually finished). Fixed purpose.md first: a typo,
+- Provenance note, so this isn't read as a from-scratch redo: everything
+  below builds directly on real work done on feat/fangraphs-style-pitching
+  (tip commit b62b8eb, pushed to origin so it survives even if deleted
+  locally later -- `git log main..origin/feat/fangraphs-style-pitching` has
+  the full 9-commit history). That branch's actual technical work holds up
+  and is credited
+  by name throughout this entry: the FanGraphs joint-model comparison
+  (fg_pitching.ipynb) and its regularization sweep, the weighted-blend
+  Pitching+ implementation (pitching.py), and bestPitch+'s counterfactual
+  search (bestpitch.py) with two rounds of real, non-obvious bug fixes (the
+  aggregate-vs-pitch-level calibration mismatch and the pinpoint-vs-smoothed
+  scoring mismatch -- see the 8/27 and 8/30 entries above). The problem this
+  new branch was started to fix was narrower than "the work was bad": that
+  branch's own name/scope was "investigate FanGraphs' joint model," and it
+  kept going well past that investigation's actual conclusion into shipping
+  production code, without the basic project infra (pinned dependencies,
+  package init files) that should have existed from the start. This branch
+  re-does the scoping, not the engineering -- ported code below is called
+  out as ported, not rewritten, unless a real change is noted.
+- New branch feat/pitching-plus-v2, off main. Fixed purpose.md first: a typo,
   a Stuff+ claim contradicting stuff.py's actual (physics-only) design, the
   bestPitch+ sign (was documented backwards), and the Pitching+ workflow
   item's target metric (named speculative xwOBA/xERA/xRE options that were
