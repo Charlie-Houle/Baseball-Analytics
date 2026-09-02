@@ -46,11 +46,15 @@ except ImportError:
 
 # ============================================================
 # CONFIGURATION
+#
+# No separate PITCHING_SCALE_K here (a dead constant of that name was
+# removed 9/2, see docs/dev_log.md): _to_100_scale is reused directly from
+# location.py and always applies its own hardcoded LOCATION_SCALE_K, so
+# Pitching+'s ratio-scale steepness is tied to Location+'s, not
+# independently tunable.
 # ============================================================
 
 REQUIRED_COLS = [PITCHER_COL, PITCH_TYPE_COL, SEASON_COL, TARGET_COL]
-
-PITCHING_SCALE_K = 0.10
 
 
 # ============================================================
@@ -189,6 +193,19 @@ def _score_pitching_plus(mean_stuff_plus, location_run_value, pitch_type, season
     real or hypothetical, needs `pitch_calibration`). Returns NaN wherever
     that (pitch_type, season) has no calibration (too few reliable
     pitcher-seasons to set a reference).
+
+    Deliberately a plain pd.merge, not a `calibration.set_index([...]).reindex(keys)`
+    MultiIndex lookup: that looked like a reasonable micro-optimization for
+    bestpitch.py's ~130-call counterfactual search (each call joins a
+    multi-million-row pitch_type/season array against calibration's few dozen
+    rows), but on the real dataset it hung for 30+ minutes inside pandas'
+    `BaseMultiIndexCodesEngine._extract_level_codes` reindexing a MultiIndex
+    built from a huge, mostly-constant `pitch_type` array against a tiny
+    table -- a known bad case for MultiIndex reindex, not a hash join. merge()
+    was never the actual bottleneck (the original 910s counterfactual-search
+    baseline already included it, unmodified). Don't re-attempt a
+    reindex/map-based replacement without benchmarking it against the full
+    3M+ row dataset first, not just the small synthetic test fixtures.
     """
 
     raw_pitching_value = _apply_blend(mean_stuff_plus, location_run_value, blend_params, level=level)

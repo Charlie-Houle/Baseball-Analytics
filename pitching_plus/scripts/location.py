@@ -28,6 +28,7 @@ loads the cache instead of retraining. Pass retrain=True (or run
 `python location.py --retrain`) to rebuild it after the underlying data changes.
 """
 
+import warnings
 from pathlib import Path
 
 import joblib
@@ -82,6 +83,8 @@ TARGET_COL = "delta_pitcher_run_exp"
 MIN_GROUP_SIZE_FOR_MODEL = 5000  # same scope gate as Stuff+
 N_FOLDS = 5
 
+HGB_PARAMS = dict(max_depth=6, learning_rate=0.05, max_iter=300, l2_regularization=1.0, random_state=42)
+
 LOCATION_SCALE_K = 0.10
 
 # Season-overall reliability needs a much bigger sample than the per-pitch-type
@@ -119,8 +122,19 @@ def _build_features(df):
     # 0 = bottom of this batter's strike zone, 1 = top.
     df["plate_z_rel"] = (df["plate_z"] - df["sz_bot"]) / (df["sz_top"] - df["sz_bot"])
 
-    # Positive = arm-side, negative = glove-side, regardless of batter stand.
-    df["plate_x_armside"] = np.where(df["stand"] == "R", df["plate_x"], -df["plate_x"])
+    # Positive = arm-side, negative = glove-side, relative to the PITCHER's
+    # throwing hand (regardless of batter stand -- that's platoon_matchup's
+    # job, not this column's). Was previously keyed on `stand` (batter
+    # handedness), which only gave the claimed sign for same-handed
+    # matchups and was inverted for platoon ones -- a real bug, fixed 9/2
+    # (see docs/dev_log.md). Derivation: plate_x is positive toward the
+    # first-base side (Statcast convention, catcher's perspective facing
+    # the pitcher); a RHB stands on the third-base side, a LHB on the
+    # first-base side. The pitcher faces the opposite direction from the
+    # catcher, so a RHP's own right/throwing-arm side is the third-base
+    # (negative plate_x) side -- matching a RHP's natural arm-side run
+    # tailing in on a RHH, who stands on that same side.
+    df["plate_x_armside"] = np.where(df["p_throws"] == "R", -df["plate_x"], df["plate_x"])
 
     df["stand_R"] = (df["stand"] == "R").astype(int)
     df["p_throws_R"] = (df["p_throws"] == "R").astype(int)
@@ -157,13 +171,7 @@ def _train_models(df):
         X = type_group[LOCATION_FEATURES].to_numpy()
         y = type_group[TARGET_COL].to_numpy()
 
-        model = HistGradientBoostingRegressor(
-            max_depth=6,
-            learning_rate=0.05,
-            max_iter=300,
-            l2_regularization=1.0,
-            random_state=42,
-        )
+        model = HistGradientBoostingRegressor(**HGB_PARAMS)
 
         kfold = KFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
         oof.loc[type_group.index] = cross_val_predict(model, X, y, cv=kfold, n_jobs=-1)
@@ -196,12 +204,43 @@ def load_cached_models(models_dir=DEFAULT_MODELS_DIR):
     return joblib.load(models_path)
 
 
+def _cache_fingerprint():
+    """
+    Everything that changes what a cached model/score actually means: the
+    feature set and the per-pitch-type training config. Saved alongside the
+    cache so a stale cache (built under a different LOCATION_FEATURES or
+    HGB_PARAMS) can be detected instead of silently reused -- previously
+    `_load_or_score` only checked file existence, so editing either while
+    developing and then calling with retrain=False would score against a
+    stale model with zero warning (docs/dev_log.md 9/2 entry). A cache saved
+    before this fingerprint existed simply has no sidecar file; that's
+    treated as "unknown," not "stale," so it doesn't force an unexpected
+    retrain the first time this code runs against an existing cache.
+    """
+
+    return {
+        "location_features": list(LOCATION_FEATURES),
+        "hgb_params": dict(HGB_PARAMS),
+        "n_folds": N_FOLDS,
+        "min_group_size_for_model": MIN_GROUP_SIZE_FOR_MODEL,
+    }
+
+
 def _load_or_score(engineered, models_dir, retrain):
     models_dir = Path(models_dir)
     models_path = models_dir / "location_models.joblib"
     scores_path = models_dir / "location_historical_scores.joblib"
+    fingerprint_path = models_dir / "location_cache_fingerprint.joblib"
 
     if not retrain and models_path.exists() and scores_path.exists():
+        if fingerprint_path.exists() and joblib.load(fingerprint_path) != _cache_fingerprint():
+            warnings.warn(
+                f"Location+ cache at {models_dir} was built under a different "
+                "LOCATION_FEATURES/HGB_PARAMS configuration than the current code. "
+                "Reusing it anyway since retrain=False; pass retrain=True to rebuild "
+                "it under the current configuration.",
+                stacklevel=2,
+            )
         models = joblib.load(models_path)
         historical_scores = joblib.load(scores_path)
     else:
@@ -209,6 +248,7 @@ def _load_or_score(engineered, models_dir, retrain):
         models_dir.mkdir(parents=True, exist_ok=True)
         joblib.dump(models, models_path, compress=3)
         joblib.dump(historical_scores, scores_path, compress=3)
+        joblib.dump(_cache_fingerprint(), fingerprint_path, compress=3)
 
     scored = engineered.merge(historical_scores, on=KEY_COLS, how="left")
     scored.index = engineered.index
@@ -273,7 +313,20 @@ def _calibrate(scored):
         .reset_index()
     )
     reliable_type = pitcher_type_agg[pitcher_type_agg["n_pitches"] >= MIN_PITCHES_FOR_SCORE].copy()
-    type_calibration = _ratio_calibration(reliable_type, [PITCH_TYPE_COL, SEASON_COL], "mean_location_value")
+
+    # Pitch-level calibration must be fit on the spread of raw, per-pitch
+    # location_run_value among pitches belonging to a reliable (pitcher,
+    # pitch_type, season) -- NOT the spread of that group's own mean
+    # (reliable_type["mean_location_value"] above), which is far narrower
+    # (an aggregate is a mean over many pitches). Using the narrower
+    # spread-of-means sigma here was the same aggregate-vs-pitch-level
+    # mismatch fixed in pitching.py on 8/30, just never fixed here: on real
+    # production data this made pitch_location_plus's reliable-population
+    # sigma ~7x too narrow (mean 121, std 65 instead of a ~100-centered
+    # scale). See docs/dev_log.md's 9/2 entry.
+    reliable_keys = reliable_type[[PITCHER_COL, PITCH_TYPE_COL, SEASON_COL]]
+    pitch_level_reliable = has_score.merge(reliable_keys, on=[PITCHER_COL, PITCH_TYPE_COL, SEASON_COL], how="inner")
+    type_calibration = _ratio_calibration(pitch_level_reliable, [PITCH_TYPE_COL, SEASON_COL], "location_run_value")
 
     # merge() resets the index, but add_location_plus reattaches this frame's
     # columns to `result` positionally via has_score.index. Restore it (left

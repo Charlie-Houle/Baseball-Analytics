@@ -469,3 +469,270 @@
   dependency), which hadn't been ported in the earlier infra pass since
   nothing needed it yet. Full suite (18 tests, stuff/location/pitching/
   bestpitch) passes.
+
+# 9/2/2026: hypercritical architecture review (stuff/location/pitching/bestpitch)
+- User asked for a hypercritical review of the whole pipeline plus an explicit
+  verdict on whether Stuff+ should be outcome-independent. Reviewed all four
+  scripts end-to-end (including the uncommitted working-tree state of
+  bestpitch.py/pitching.py from the separate counterfactual-search-
+  optimization session -- see that entry's context below), cross-checked
+  every dev-log-claimed fix against the current code, and where a claim was
+  checkable, verified it empirically against the real cached models and
+  data/MLB_2021-2025_plus.csv rather than trusting the code/comments alone.
+- Verdict on the central question: keep Stuff+'s fitting process
+  outcome-independent. The factored pipeline design, Stuff+'s much higher
+  year-over-year stability than Location+ (~0.89 vs ~0.41, see 8/27 entry),
+  and the joint-model experiment (fg_pitching.ipynb: a single model fed more
+  information generalizes worse than the two-input blend) all support it.
+  But the design has never been validated against anything outcome-shaped,
+  even as a diagnostic -- every existing check on Stuff+ is either
+  near-tautological (own release_speed vs. own pitch_stuff_plus, and
+  release_speed is one of the composite's own six inputs) or a check on the
+  downstream Pitching+ blend, never a check on the composite in isolation
+  against a bat-missing proxy (whiff rate, CSW%, chase rate, hard-hit rate).
+  Recommended next step: add a held-out validation notebook cell correlating
+  pitch_stuff_plus/stuff_plus against such a proxy per pitch type -- a
+  diagnostic only, not a change to how the composite is fit.
+- Found a real, empirically-confirmed bug: location.py's `_calibrate`
+  (lines 265-302) has the identical aggregate-vs-pitch-level sigma mismatch
+  that was fixed in pitching.py on 8/30, but unfixed here. `_ratio_calibration`
+  fits agg_mu/agg_sigma from the spread of per-(pitcher, pitch_type, season)
+  MEANS, and that sigma is then applied to raw per-pitch location_run_value
+  to produce pitch_location_plus (line 285). Checked directly against FF/2023
+  in the real production data: pitch-level std of location_run_value is
+  0.0461; the aggregate sigma actually used is 0.0065, ~7x too narrow.
+  Result: pitch_location_plus for FF/2023 has mean 121.4, std 64.6, max 806.5
+  (n=230,188), instead of the intended ~100-centered, comparably-scaled
+  distribution the season-level location_plus correctly has (mean 100.0,
+  std 9.7). This doesn't reach pitching.py/bestpitch.py's own scoring math
+  (both recompute their own correctly-split sigmas from raw
+  location_run_value directly, never consuming pitch_location_plus), but
+  pitch_location_plus itself is a documented headline output and is
+  currently untrustworthy at the pitch level. Not caught by any existing
+  test: test_location.py has no test on pitch_location_plus's calibration at
+  all, and the one test that exercises _ratio_calibration/_to_100_scale
+  fits and applies to the SAME distribution, so it can't detect a
+  cross-level mismatch by construction. stuff.py's _score_stuff_plus has the
+  identical code pattern (agg_sigma from spread-of-means, applied to raw
+  pitch_composite) but doesn't show the same failure in practice --
+  physics has much lower pitch-to-pitch noise relative to between-pitcher
+  spread than run value does, so the two sigmas don't diverge nearly as
+  much (checked FF/2023: pitch_stuff_plus mean 100.9, std 12.8, sane) -- but
+  this hasn't been measured systematically per pitch type and is worth a
+  direct spread check before fully trusting pitch_stuff_plus's tails.
+- Found a likely real, unfixed bug: location.py's plate_x_armside
+  (line 122-123) is computed as `np.where(stand == "R", plate_x, -plate_x)`
+  -- keyed on BATTER handedness (stand) -- while its own inline comment
+  claims the result is "regardless of batter stand." Arm-side is by
+  definition pitcher-relative; the formula should key off p_throws, not
+  stand, and as written only gives the claimed sign for same-handed
+  matchups (inverted for platoon matchups). Likely low impact on the
+  location model's actual accuracy, since LOCATION_FEATURES also carries
+  raw plate_x, stand_R, and p_throws_R separately, so the model can learn
+  the real interaction regardless of this one derived column's labeling.
+  But the identical formula is copy-pasted into bestpitch.py in 4 places
+  (_predict_at_point and the 3 batched-array equivalents), and
+  test_location.py::test_plate_z_rel_and_armside currently asserts the
+  batter-keyed sign as ground truth, so it would resist rather than catch a
+  correct fix. Flagging for a domain-expert sign check before touching --
+  the categorical bug (code contradicts its own comment) is unambiguous;
+  the exact correct sign convention is worth verifying against Statcast's
+  real coordinate convention first.
+- Found that bestpitch.py's "reliable arsenal" gate can violate its own
+  documented invariant. _arsenal_wide (lines 165-181) restricts candidates
+  to stuff_plus_reliable == True pitch types per pitcher-season
+  (MIN_PITCHES_FOR_SCORE, 20). A pitch type thrown fewer than 20 times that
+  season never enters the candidate search at all -- including for scoring
+  that type's own pitches -- so for those pitches best_pitching_plus is
+  computed only from the pitcher's OTHER reliable pitch types. This directly
+  contradicts the module docstring's claim (lines 39-42) that the actual
+  (pitch type, zone) combination is "always" a candidate, which is what
+  makes best_pitching_plus >= actual a near-structural guarantee. Confirmed
+  via a synthetic repro (a pitcher with 3 CU pitches, below the reliability
+  bar): cand_stuff_CU is NaN for every row in that pitcher-season. Didn't
+  flip any signs in the small repro (other pitch types still had a higher
+  ceiling) but the mechanism is real and will bite hardest for a starter's
+  rarely-used show-me pitch -- a realistic, non-edge-case population the
+  current test fixture doesn't cover (every synthetic pitch type clears
+  every threshold).
+- Found that both regression tests written for the 8/30 fixes would not
+  catch either bug's reintroduction, confirmed empirically, not just by
+  inspection:
+    - test_pitching.py::test_pitch_level_calibration_uses_its_own_spread_not_the_aggregates:
+      monkeypatched _apply_blend to always use loc_sigma_agg regardless of
+      `level` (i.e. reintroduced the original bug) and reran the test's own
+      logic -- it still passed (group means still land on exactly 100.0,
+      since the calibration-fit step and the scoring call route through the
+      same, consistently-wrong dispatch). The loc_sigma_pitch > loc_sigma_agg
+      assertion only checks how the sigma is computed, never whether it's
+      actually selected correctly per level, and no test touches
+      add_pitching_plus's own pitch_pitching_plus output magnitude via the
+      public entry point at all.
+    - test_bestpitch.py::test_add_bestpitch_plus_junk_and_best_meets_or_exceeds_actual:
+      reproduced the exact pre-fix formula (best_pitching_plus -
+      pitch_pitching_plus, pinpoint instead of smoothed) on the test's own
+      fixture -- it still clears the >0.9 non-negative threshold (95.6%),
+      because the fixture's pitch-level noise is far gentler than real
+      Statcast data, where this bug drove the non-negative fraction down to
+      46.4% (see 8/30 entry).
+  Both fixes ARE correctly implemented in the current code (every call site
+  of _apply_blend/_score_pitching_plus/_fit_pitching_plus_model traced and
+  confirmed passing the right level/calibration) -- this finding is
+  specifically that the tests guarding them have no teeth.
+- Smaller findings, roughly in order of severity: stuff.py's
+  horizontal_acceleration (line 146, sqrt(ax^2+ay^2)) is likely mislabeled --
+  ay is forward-path drag deceleration, not lateral movement, and typically
+  dwarfs ax in magnitude, yet this feeds directly into
+  movement_per_reaction_time, the single highest-loading PC1 feature per the
+  8/26 entry; worth a direct check since a physics-only composite with no
+  outcome feedback has no way to notice this on its own. stuff.py's
+  pitcher_agg groupby key includes PLAYER_NAME_COL (line 231) for no
+  computational reason, creating a latent row-duplication risk in the final
+  merge if any (pitcher, pitch_type, season) ever has more than one distinct
+  player_name string (untestable with the current fixture, which assigns
+  player_name as a deterministic function of pitcher id). PITCHING_SCALE_K
+  (pitching.py:53) is defined and never used anywhere -- _to_100_scale always
+  uses location.py's hardcoded LOCATION_SCALE_K instead, so tuning either
+  constant doesn't do what it looks like it does. location.py's model cache
+  (_load_or_score, lines 199-226) has no staleness protection beyond file
+  existence -- editing LOCATION_FEATURES or the HGB hyperparameters and
+  calling with retrain=False silently scores against the stale model.
+  bestpitch.py's _actual_smoothed_pitching_plus scores real historical
+  pitches with the refit-on-all-data cached model rather than location.py's
+  OOF scores (keeps the best-vs-actual comparison internally consistent,
+  which is what the 8/30 fix needed, but means bestPitch+'s absolute
+  magnitude carries a different, slightly more optimistic rigor level than
+  the headline location_plus/pitching_plus columns -- currently
+  undocumented). stuff.py computes and discards a lot of dead feature
+  engineering (spin_axis_sin/cos, velocity_mag, horizontal_velocity, and
+  every 10/20/40ft trajectory column except time_30ft) left over from the
+  notebook's V2 arsenal-comparison work. MIN_PITCHES_FOR_SCORE=20 is
+  directly contradicted by the 8/27 entry's own finding that Stuff+'s R^2
+  keeps climbing well past 20 pitches. full_pipeline.py has zero test
+  coverage (no test calls run_pipeline end-to-end).
+- On the uncommitted bestpitch.py rewrite specifically (vectorized/batched
+  counterfactual search -- _build_base_array,
+  _batched_target_averaged_location_run_value,
+  _all_zones_target_averaged_location_run_value -- from the separate
+  counterfactual-search-optimization session): checked the core dedup
+  assumption by hand and it holds -- re288_state = (outs*8 + base_state)*12
+  + count_state (location.py:115-117) is a genuine bijection over its
+  inputs, so center_key correctly identifies rows the location model can't
+  tell apart. But it's an invariant enforced only by convention across two
+  files with no assertion checking group-homogeneity; a future column added
+  to LOCATION_FEATURES without a matching update here would silently
+  corrupt whole groups of predictions rather than crash. More concretely:
+  _predict_at_point (the pre-rewrite reference implementation) is no longer
+  called from the production path and isn't wired into any pytest as an
+  equivalence oracle for the new batched path (it's still used by
+  notebooks/location_smoothing_check.ipynb for offline validation, but that
+  isn't checked-in test coverage). And tests/conftest.py's fixture holds
+  sz_top/sz_bot constant across every row, so zone_height never varies --
+  the new ZONE_HEIGHT_DEDUP_ROUND_FT bucketing logic (the actual novel part
+  of this rewrite) is structurally untested; the fixture can't distinguish
+  "dedup by rounded zone height works" from "there's only one zone height
+  anyway." The docstrings' equivalence claims ("verified... max abs diff
+  ~1e-13") describe an ad hoc check, not a checked-in regression test.
+- No code changes made in this entry -- review only. Step-by-step fix list
+  handed to the user directly (not duplicated here); highest priority items
+  are the location.py sigma fix (mirrors pitching.py's existing pattern) and
+  strengthening the two tautological regression tests above.
+
+# 9/2/2026 (cont'd): implemented the review's fix list
+- Fixed location.py's pitch-level calibration sigma mismatch (`_calibrate`):
+  `type_calibration` now fits agg_mu/agg_sigma on the real per-pitch
+  location_run_value spread among reliable-arsenal pitches
+  (`pitch_level_reliable`), not the far narrower spread of per-pitcher-season
+  means, mirroring pitching.py's own aggregate/pitch split. Added
+  test_location.py::test_pitch_location_plus_calibration_uses_pitch_level_spread_not_the_aggregates,
+  which checks the actual magnitude the bug broke (mean-100 alone can't
+  catch this bug class -- confirmed both here and for pitching.py's
+  equivalent test, see below).
+- Fixed bestpitch.py's reliable-arsenal invariant gap: `add_bestpitch_plus`
+  now takes `np.fmax(best_pitching_plus, actual_smoothed)` (only where a
+  candidate search actually ran for that row) before computing
+  pitch_bestpitch_plus, restoring the "actual combination is always a
+  candidate" guarantee even when the pitch's own type falls outside that
+  pitcher-season's reliable arsenal. Added
+  test_bestpitch.py::test_add_bestpitch_plus_own_pitch_always_a_candidate_even_if_unreliable.
+- Hardened two regression tests that were empirically shown (by the review)
+  to have no power against the bug classes they're supposed to guard:
+  test_pitching.py::test_apply_blend_level_dispatch_actually_uses_the_right_sigma
+  (checks _apply_blend's actual level="aggregate" vs. level="pitch" effect,
+  not just that mean lands on 100) and
+  test_bestpitch.py::test_actual_smoothed_differs_from_pinpoint_pitch_pitching_plus
+  (checks the smoothed-vs-pinpoint mechanism directly, immune to fixture
+  noise magnitude, unlike the existing end-to-end sign-rate test).
+- Fixed plate_x_armside (location.py `_build_features`): now keyed on
+  `p_throws` (pitcher) instead of `stand` (batter), per the derivation in
+  the review (RHB stands 3B-side/negative plate_x, LHB 1B-side/positive;
+  pitcher faces the opposite direction from the catcher-perspective
+  convention plate_x uses, so a RHP's own arm side is negative plate_x).
+  Propagated to the 4 mirrored spots in bestpitch.py's batched search
+  (`_predict_at_point`, `_build_base_array` now returns `p_throws_is_R`
+  instead of `stand_is_R`, and both `_batched_target_averaged_location_run_value`/
+  `_all_zones_target_averaged_location_run_value`). Rewrote
+  test_location.py::test_plate_z_rel_and_armside, which previously
+  certified the batter-keyed sign as correct (four rows varying stand and
+  p_throws independently now confirm the sign tracks p_throws only).
+- Varied sz_top/sz_bot per row in tests/conftest.py's fixture (previously a
+  fixed 3.5/1.5 constant) and added
+  test_bestpitch.py::test_batched_target_averaging_matches_unbatched_reference_with_varying_zone_height,
+  an equivalence test between the uncommitted counterfactual-search
+  rewrite's batched/deduplicated path and the original per-row
+  `_predict_at_point` reference, using real per-row zone-height variation so
+  ZONE_HEIGHT_DEDUP_ROUND_FT's bucketing is actually exercised (previously
+  untestable -- a constant zone_height can't distinguish correct bucketing
+  from a bug). Passes at atol=1e-6, and incidentally also confirms the
+  armside fix is applied consistently between the batched and reference
+  paths (they'd disagree otherwise).
+- Added the Stuff+ outcome-proxy validation diagnostic recommended in the
+  review, in notebooks/stuff.ipynb (not stuff.py -- diagnostic only, no
+  change to how Stuff+ is fit): correlated stuff_plus against CSW%
+  (called-strike-plus-whiff rate) per pitch type and pooled, on 2023-2024
+  data (>=100 pitches of outcome data as the reliability bar). Real result,
+  verified against an equivalent standalone run of stuff.py's actual
+  add_stuff_plus (not reimplemented logic): pooled Spearman rho +0.078
+  (p=2e-6, n=3,721 reliable pitcher-pitch_type-seasons) -- real but weak.
+  Per pitch type, most are positive (ST +0.219 p=0.0001, SL +0.155 p=0.0001,
+  FF +0.085 p=0.007), but CH (-0.056) and FS (-0.141) are negative point
+  estimates, though neither reaches significance at these sample sizes. Read:
+  the physics-only composite's "more outlier = harder to hit" assumption
+  holds, but weakly and not uniformly -- changeups/splitters show no
+  positive signal here. Doesn't change the outcome-independent design
+  (architecture + stability + joint-model evidence still favor it), but is
+  real evidence against treating a high Stuff+ score as a strong bat-missing
+  guarantee, especially for off-speed types. NOTE: the notebook cells were
+  not executed in-session (would require rerunning the full V1/V2 feature
+  engineering pipeline on 3.55M rows, expensive); the numbers above are
+  verified correct via an equivalent standalone script using the actual
+  production add_stuff_plus, not fabricated.
+- Cleanup: removed pitching.py's dead PITCHING_SCALE_K constant (a comment
+  now clarifies Pitching+'s ratio scale is tied to location.py's
+  LOCATION_SCALE_K, not independently tunable). Trimmed stuff.py's
+  `_build_v1_features` to only compute what STUFF_FEATURES actually reads
+  (acceleration_mag, horizontal_acceleration, time_30ft) instead of also
+  building spin_axis_sin/cos, velocity_mag, horizontal_velocity, and full
+  x/z/vx/vy/vz/speed trajectories at 10/20/30/40ft for every in-scope pitch;
+  replaced TRAJ_DISTANCES with REACTION_DISTANCE_FT=30. Dropped
+  PLAYER_NAME_COL from stuff.py's pitcher_agg groupby key (unused downstream,
+  was a latent merge-fanout risk). Added a cache-staleness warning to
+  location.py: `_cache_fingerprint()` (LOCATION_FEATURES + the now-factored-
+  out HGB_PARAMS + N_FOLDS + MIN_GROUP_SIZE_FOR_MODEL) is saved alongside
+  the model cache; a mismatch on load warns instead of silently reusing a
+  stale cache (a cache saved before this existed has no fingerprint file and
+  is treated as "unknown," not forced to retrain). Gave full_pipeline.py's
+  `run_pipeline` models_dir/retrain parameters (previously hardcoded to the
+  real production cache with no way to point at an isolated one) and added
+  tests/test_full_pipeline.py, the first test to actually call it end-to-end
+  rather than only piecewise through each module's own tests.
+- Deliberately NOT changed: MIN_PITCHES_FOR_SCORE=20, despite the review's
+  finding that Stuff+'s own R^2 keeps improving well past that bar (8/27
+  entry) -- picking a real replacement value needs the kind of reliability
+  sweep that finding came from, re-run and re-decided, not a quick constant
+  bump that would silently shift every reported Stuff+/Pitching+ number.
+- Full suite: 25 tests pass (18 baseline + 7 new: the location sigma
+  regression test, the pitching dispatch-effect test, the bestpitch arsenal-
+  invariant test, the bestpitch smoothed-vs-pinpoint mechanism test, the
+  bestpitch batched-equivalence test, the location cache-staleness-warning
+  test, and test_full_pipeline.py's end-to-end test).

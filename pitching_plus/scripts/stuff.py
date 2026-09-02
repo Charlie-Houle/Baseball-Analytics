@@ -52,7 +52,13 @@ PHYSICS_COLS = [
 
 REQUIRED_COLS = [PITCHER_COL, PITCH_TYPE_COL, SEASON_COL, PLAYER_NAME_COL] + PHYSICS_COLS
 
-TRAJ_DISTANCES = [10, 20, 30, 40]
+# Distance (feet from release) used for "reaction time" in
+# movement_per_reaction_time -- purpose.md's "Reaction x Movement" concept.
+# stuff.ipynb's exploration notebook solves full trajectories (position,
+# velocity, spin_axis_sin/cos, etc.) at several distances for its V2
+# arsenal-comparison features; only this one distance's TIME is read by
+# STUFF_FEATURES here, so that's all the production script builds.
+REACTION_DISTANCE_FT = 30
 
 # Features that go into the per-pitch PCA composite. Deduped to avoid
 # redundant features inflating PCA weights (e.g. reaction time is r=0.99
@@ -127,53 +133,18 @@ def _solve_time_to_y_vectorized(y0, vy0, ay, distance):
 
 def _build_v1_features(df):
     """
-    Adds spin-axis, derived-physics, and per-distance trajectory features.
-    Expects `df` to already be filtered to in-scope pitch types with
-    complete PHYSICS_COLS (no NaNs).
+    Adds derived-physics and reaction-time features. Expects `df` to already
+    be filtered to in-scope pitch types with complete PHYSICS_COLS (no NaNs).
     """
 
     df = df.copy()
 
-    # Spin axis is circular, so represent it as sin/cos rather than
-    # treating degrees as a normal continuous variable.
-    theta = np.deg2rad(df["spin_axis"])
-    df["spin_axis_sin"] = np.sin(theta)
-    df["spin_axis_cos"] = np.cos(theta)
-
-    df["velocity_mag"] = np.sqrt(df["vx0"] ** 2 + df["vy0"] ** 2 + df["vz0"] ** 2)
     df["acceleration_mag"] = np.sqrt(df["ax"] ** 2 + df["ay"] ** 2 + df["az"] ** 2)
-    df["horizontal_velocity"] = np.sqrt(df["vx0"] ** 2 + df["vy0"] ** 2)
     df["horizontal_acceleration"] = np.sqrt(df["ax"] ** 2 + df["ay"] ** 2)
 
-    for distance in TRAJ_DISTANCES:
-        y0 = df["release_pos_y"].to_numpy()
-        vy0 = df["vy0"].to_numpy()
-        ay = df["ay"].to_numpy()
-        x0 = df["release_pos_x"].to_numpy()
-        vx0 = df["vx0"].to_numpy()
-        ax = df["ax"].to_numpy()
-        z0 = df["release_pos_z"].to_numpy()
-        vz0 = df["vz0"].to_numpy()
-        az = df["az"].to_numpy()
-
-        t = _solve_time_to_y_vectorized(y0, vy0, ay, distance)
-
-        # NaN in t propagates naturally through this arithmetic.
-        with np.errstate(invalid="ignore"):
-            x = x0 + vx0 * t + 0.5 * ax * t**2
-            z = z0 + vz0 * t + 0.5 * az * t**2
-            vx = vx0 + ax * t
-            vy = vy0 + ay * t
-            vz = vz0 + az * t
-            speed = np.sqrt(vx**2 + vy**2 + vz**2)
-
-        df[f"x_{distance}ft"] = x
-        df[f"z_{distance}ft"] = z
-        df[f"vx_{distance}ft"] = vx
-        df[f"vy_{distance}ft"] = vy
-        df[f"vz_{distance}ft"] = vz
-        df[f"speed_{distance}ft"] = speed
-        df[f"time_{distance}ft"] = t
+    df["time_30ft"] = _solve_time_to_y_vectorized(
+        df["release_pos_y"].to_numpy(), df["vy0"].to_numpy(), df["ay"].to_numpy(), REACTION_DISTANCE_FT
+    )
 
     # "Reaction x Movement": how much the ball deviates within the reaction
     # window available (purpose.md's explicit concept), and the single
@@ -225,10 +196,16 @@ def _score_stuff_plus(df):
 
     # Aggregate to (pitcher, pitch_type, season). Stuff+ is reported at
     # this level, matching how real "+" stats (wRC+, ERA-) work.
+    # PLAYER_NAME_COL deliberately isn't in the groupby key (or read at all
+    # downstream -- add_stuff_plus's final merge never selects it): folding
+    # it in added a latent risk of duplicating rows in that merge if any
+    # (pitcher, pitch_type, season) ever had more than one distinct
+    # player_name string in the raw data (encoding variants, mid-season name
+    # corrections), for no benefit. See docs/dev_log.md's 9/2 entry.
     pitcher_agg = (
         stuff_df
         .dropna(subset=["pitch_composite"])
-        .groupby([PITCHER_COL, PITCH_TYPE_COL, SEASON_COL, PLAYER_NAME_COL], observed=True)["pitch_composite"]
+        .groupby([PITCHER_COL, PITCH_TYPE_COL, SEASON_COL], observed=True)["pitch_composite"]
         .agg(mean_composite="mean", n_pitches="count")
         .reset_index()
     )

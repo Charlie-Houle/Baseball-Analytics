@@ -62,8 +62,12 @@ def _build_raw_df(
             stand = rng.choice(["L", "R"], size=n)
             p_throws = rng.choice(["L", "R"], size=n)
 
-            sz_top = np.full(n, 3.5)
-            sz_bot = np.full(n, 1.5)
+            # Real per-pitch strike-zone height (each batter's own estimated
+            # zone, like real Statcast data), not a fixed constant: exercises
+            # bestpitch.py's ZONE_HEIGHT_DEDUP_ROUND_FT bucketing, which a
+            # constant zone_height couldn't (docs/dev_log.md 9/2 entry).
+            sz_top = rng.normal(3.5, 0.15, size=n)
+            sz_bot = rng.normal(1.5, 0.15, size=n)
             plate_x = rng.normal(0, 0.8, size=n)
             plate_z = rng.normal(2.5, 0.6, size=n)
 
