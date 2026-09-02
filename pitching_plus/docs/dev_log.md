@@ -736,3 +736,46 @@
   invariant test, the bestpitch smoothed-vs-pinpoint mechanism test, the
   bestpitch batched-equivalence test, the location cache-staleness-warning
   test, and test_full_pipeline.py's end-to-end test).
+
+# 9/2 (cont'd): rebuilt notebooks/bestpitch.ipynb, dropped an off-scope exploration cell
+- notebooks/bestpitch.ipynb never actually made it onto this branch (or its
+  parent, feat/pitching-plus-v2): the 8/31 porting entry above only carried
+  over bestpitch.py/pitching.py (scripts) from feat/fangraphs-style-pitching,
+  not the exploration notebook. Rebuilt it fresh, in the same style/section
+  order as the original (score the full pipeline, zone-reference sanity
+  check, bestPitch+ sign check, closest-to-optimal leaderboard, synopsis),
+  reran against the current code rather than ported verbatim, so its numbers
+  reflect this branch's actual fixes (armside, calibration sigma, arsenal
+  invariant), not the old branch's.
+- Added, then removed, a "Potential+" (Pitching+ + bestPitch+) exploration
+  cell (top-10 SP/RP leaderboard) -- an idle "what if" look at combining
+  realized quality with room-for-improvement, not something purpose.md
+  defines or any script computes. Cut since it's not currently used anywhere
+  and doesn't belong in an exploration notebook that's supposed to mirror
+  what's actually shipped; the idea can come back as a real proposal (with
+  its own purpose.md entry and a decision on what the combined number is
+  supposed to mean) if it turns out to be useful later.
+- Verification pass before considering this branch mergeable: reread
+  purpose.md, README.md, and all four scripts end-to-end against the current
+  dev_log's claims (sign conventions, calibration levels, cache fingerprinting,
+  the arsenal-invariant fmax fix) -- all confirmed matching, full 25-test
+  suite still green.
+- Found and removed leftover temporary profiling instrumentation in
+  bestpitch.py's `_search_best_pitching_plus` (the build/predict/score-assign
+  wall-clock timers and the `[profile]` print, added during the
+  counterfactual-search vectorization work and explicitly marked "temporary"
+  in its own comment). That investigation is done -- the batched/deduplicated
+  rewrite it was measuring is already reviewed, tested, and documented above
+  -- so the instrumentation no longer earns its keep as shipped code. No
+  behavior change: `verbose=True`'s per-candidate progress line is untouched.
+- Checked feat/pitching-plus-v2 and feat/fangraphs-style-pitching for anything
+  substantive not yet reflected here: feat/pitching-plus-v2 is a strict
+  ancestor of this branch (nothing left to port). feat/fangraphs-style-pitching
+  (unmerged, still pushed to origin) is fully superseded -- every real fix
+  and script it introduced was already ported and improved on 8/31 and 9/2
+  (see the provenance note above); its own bestpitch.ipynb has the identical
+  section structure to the one rebuilt above, confirming nothing was lost in
+  the redo. Its consolidated tests/test_pitching_plus.py (one file for all
+  four modules) versus this branch's one-file-per-module layout is a style
+  difference, not a missing capability -- not worth reverting the recent
+  tests/ reorg for.

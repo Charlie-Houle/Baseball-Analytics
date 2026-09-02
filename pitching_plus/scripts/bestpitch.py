@@ -476,14 +476,6 @@ def _search_best_pitching_plus(engineered, models, zone_ref, blend_params, pitch
     candidate_num = 0
     start = time.time()
 
-    # PROFILING (temporary, for the bestpitch-v2 investigation into where the
-    # ~1000s is actually going now that predict() calls are batched -- see
-    # docs/dev_log.md / the plan for this branch). Cumulative time in each
-    # phase across all 130 candidates, printed once at the end.
-    build_phase_time = 0.0
-    predict_phase_time = 0.0
-    score_assign_phase_time = 0.0
-
     for ptype, model in models.items():
         cand_col = f"cand_stuff_{ptype}"
         if cand_col not in engineered.columns:
@@ -497,32 +489,26 @@ def _search_best_pitching_plus(engineered, models, zone_ref, blend_params, pitch
         # base, and everything derived from it below, is identical across all
         # 13 zones for this pitch type -- build it once here rather than
         # inside the zone loop (see _build_base_array's docstring).
-        t0 = time.time()
         base_array, p_throws_is_R, zone_height, center_key = _build_base_array(base)
         cand_stuff = base[cand_col].to_numpy()
         pitch_types = np.full(len(base), ptype)
         seasons = base[SEASON_COL].to_numpy()
-        build_phase_time += time.time() - t0
 
         # All 13 zones' location predictions in 2 model.predict() calls total
         # (not 2 per zone -- see _all_zones_target_averaged_location_run_value's
         # docstring), since base_array/p_throws_is_R/zone_height/center_key
         # don't vary by zone either.
-        t0 = time.time()
         location_run_value_hyp_all = _all_zones_target_averaged_location_run_value(
             model, base_array, p_throws_is_R, zone_height, center_key, zone_ref
         )
-        predict_phase_time += time.time() - t0
 
         for zi, (zone, ref_row) in enumerate(zone_ref.iterrows()):
-            t0 = time.time()
             location_run_value_hyp = location_run_value_hyp_all[zi]
             pitching_plus_hyp = pitching_mod._score_pitching_plus(
                 cand_stuff, location_run_value_hyp, pitch_types, seasons,
                 blend_params, pitch_calibration, level="pitch",
             )
             best.loc[base.index] = np.fmax(best.loc[base.index].to_numpy(), pitching_plus_hyp)
-            score_assign_phase_time += time.time() - t0
 
             candidate_num += 1
             if verbose:
@@ -532,12 +518,6 @@ def _search_best_pitching_plus(engineered, models, zone_ref, blend_params, pitch
                     f"{covered:,}/{total_rows:,} rows covered ({covered / total_rows:.0%}) -- "
                     f"{time.time() - start:.0f}s elapsed"
                 )
-
-    if verbose:
-        print(
-            f"  [profile] build={build_phase_time:.0f}s predict={predict_phase_time:.0f}s "
-            f"score+assign={score_assign_phase_time:.0f}s (of {time.time() - start:.0f}s total)"
-        )
 
     return best
 
