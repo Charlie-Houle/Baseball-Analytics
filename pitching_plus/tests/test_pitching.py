@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pitching_plus.scripts import location, pitching, stuff
+from pitching_plus.scripts import pitching
 
 
 def test_add_pitching_plus_missing_columns_raises():
@@ -11,7 +11,7 @@ def test_add_pitching_plus_missing_columns_raises():
 
 
 def test_add_pitching_plus_junk_and_reliable_calibration_mean_100(
-    make_raw_df, small_stuff_thresholds, small_location_thresholds, tmp_path
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, small_pitching_thresholds, tmp_path
 ):
     raw = make_raw_df(
         n_per_type=300, pitch_types=("FF", "SL"), junk_pitch_types=("KN",),
@@ -36,82 +36,59 @@ def test_add_pitching_plus_junk_and_reliable_calibration_mean_100(
     assert all(m == pytest.approx(100.0, abs=1e-6) for m in means)
 
 
-def test_pitch_level_calibration_uses_its_own_spread_not_the_aggregates(
-    make_raw_df, small_stuff_thresholds, small_location_thresholds, tmp_path
+def test_pitch_pitching_plus_calibration_uses_pitch_level_spread_not_the_aggregates(
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, small_pitching_thresholds, tmp_path
 ):
-    # Regression test for the aggregate-vs-pitch-level calibration mismatch:
-    # location_run_value has much more spread at the pitch level than at the
-    # (pitcher, pitch_type, season) aggregate level (an aggregate is a mean
-    # over many pitches). Using the aggregate's spread to z-score pitch-level
-    # values would inflate every pitch-level score's distance from 100;
-    # confirmed by checking loc_sigma_pitch > loc_sigma_agg here, and that
-    # the pitch-level population (not just the aggregate one) also
-    # calibrates to a mean of ~100 under its own dedicated calibration.
+    # Regression test for the aggregate-vs-pitch-level calibration mismatch
+    # this rewrite fixed from day one (docs/dev_log.md's 9/2, 8/30, and 9/4
+    # entries): a calibration sigma fit from the spread of per-(pitcher,
+    # pitch_type, season) MEANS is far narrower than the raw per-pitch
+    # spread, and applying it to per-pitch values overdisperses
+    # pitch_pitching_plus badly. Mean landing on 100 is NOT a sufficient
+    # check on its own -- the ratio-scale renormalization forces mean == 100
+    # regardless of which sigma was used -- so this checks the real
+    # magnitude/spread the bug actually breaks.
     raw = make_raw_df(n_per_type=300, pitch_types=("FF", "SL"), n_pitchers=10)
-    scored = location.add_location_plus(stuff.add_stuff_plus(raw), models_dir=tmp_path, retrain=True)
-    in_scope = scored.dropna(subset=["pitch_stuff_plus", "stuff_plus", "location_run_value", "delta_pitcher_run_exp"])
+    result = pitching.add_pitching_plus(raw, models_dir=tmp_path, retrain=True)
+    has_score = result.dropna(subset=["pitching_run_value"])
 
-    blend_params, calibration, pitch_calibration, pitcher_agg = pitching._fit_pitching_plus_model(in_scope)
-
-    assert blend_params["loc_sigma_pitch"] > blend_params["loc_sigma_agg"]
-
-    # The pitch-level calibration's own reference population (every pitch
-    # belonging to a reliable pitcher-pitch-type-season) should itself
-    # average to ~100 per (pitch_type, season), same anchoring convention as
-    # every other level in this codebase.
-    reliable_keys = pitcher_agg[pitcher_agg["reliable"]][["pitcher", "pitch_type", "game_year"]]
-    reliable_pitches = in_scope.merge(reliable_keys, on=["pitcher", "pitch_type", "game_year"], how="inner")
-    scores = pitching._score_pitching_plus(
-        reliable_pitches["stuff_plus"], reliable_pitches["location_run_value"],
-        reliable_pitches["pitch_type"], reliable_pitches["game_year"],
-        blend_params, pitch_calibration, level="pitch",
+    pitcher_type_agg = (
+        has_score.groupby(["pitcher", "pitch_type", "game_year"], observed=True)["pitching_run_value"]
+        .agg(mean_pitching_value="mean", n_pitches="count").reset_index()
     )
-    means = pd.Series(scores).groupby([reliable_pitches["pitch_type"].to_numpy(), reliable_pitches["game_year"].to_numpy()]).mean()
-    assert all(m == pytest.approx(100.0, abs=1e-6) for m in means)
+    reliable_type = pitcher_type_agg[pitcher_type_agg["n_pitches"] >= pitching.MIN_PITCHES_FOR_SCORE]
+    assert len(reliable_type) > 0
 
+    # Confirm this fixture actually has the property the bug depends on:
+    # the spread of per-pitcher-season MEANS is meaningfully narrower than
+    # the real pitch-level spread (an aggregate is a mean over many
+    # pitches, which suppresses noise) -- otherwise this test couldn't
+    # distinguish a correct fix from the bug at all.
+    aggregate_of_means_sigma = reliable_type.groupby(["pitch_type", "game_year"])["mean_pitching_value"].std().mean()
+    reliable_pitches = has_score.merge(
+        reliable_type[["pitcher", "pitch_type", "game_year"]], on=["pitcher", "pitch_type", "game_year"], how="inner"
+    )
+    pitch_level_sigma = reliable_pitches.groupby(["pitch_type", "game_year"])["pitching_run_value"].std().mean()
+    assert pitch_level_sigma > aggregate_of_means_sigma * 1.3
 
-def test_apply_blend_level_dispatch_actually_uses_the_right_sigma(
-    make_raw_df, small_stuff_thresholds, small_location_thresholds, tmp_path
-):
-    # The mean-100 checks above pass regardless of whether _apply_blend's
-    # `level` dispatch is wired correctly, since the ratio-scale
-    # renormalization forces mean == 100 by construction no matter which
-    # sigma was used to compute the z-score. Confirmed directly: monkeypatching
-    # _apply_blend to always use loc_sigma_agg (i.e. reintroducing the
-    # original 8/30 bug) and rerunning the test above's own logic still
-    # passes (see docs/dev_log.md's 9/2 entry). This test instead checks the
-    # dispatch's actual EFFECT: scoring the same pitch-level inputs at
-    # level="aggregate" vs. level="pitch" must differ, and in the direction
-    # a wider pitch-level sigma implies (z-scores, and therefore the
-    # blended raw score, pulled closer to the mean).
-    raw = make_raw_df(n_per_type=300, pitch_types=("FF", "SL"), n_pitchers=10)
-    scored = location.add_location_plus(stuff.add_stuff_plus(raw), models_dir=tmp_path, retrain=True)
-    in_scope = scored.dropna(subset=["pitch_stuff_plus", "stuff_plus", "location_run_value", "delta_pitcher_run_exp"])
-    blend_params, *_ = pitching._fit_pitching_plus_model(in_scope)
-    assert blend_params["loc_sigma_pitch"] > blend_params["loc_sigma_agg"]
-
-    sample = in_scope.iloc[:50]
-    agg_value = pitching._apply_blend(sample["stuff_plus"], sample["location_run_value"], blend_params, level="aggregate")
-    pitch_value = pitching._apply_blend(sample["stuff_plus"], sample["location_run_value"], blend_params, level="pitch")
-
-    # A dispatch bug that always used loc_sigma_agg (the original bug) would
-    # make these identical; a correct dispatch must not.
-    assert not np.allclose(agg_value, pitch_value)
-
-    loc_z_agg = (sample["location_run_value"] - blend_params["loc_mu"]) / blend_params["loc_sigma_agg"]
-    loc_z_pitch = (sample["location_run_value"] - blend_params["loc_mu"]) / blend_params["loc_sigma_pitch"]
-    # The wider, correct pitch-level sigma should pull location z-scores
-    # closer to 0 on average than the narrower aggregate sigma would.
-    assert np.abs(loc_z_pitch).mean() < np.abs(loc_z_agg).mean()
+    reliable_scored = result.merge(
+        reliable_type[["pitcher", "pitch_type", "game_year"]], on=["pitcher", "pitch_type", "game_year"], how="inner"
+    ).dropna(subset=["pitch_pitching_plus"])
+    assert len(reliable_scored) > 0
+    assert reliable_scored["pitch_pitching_plus"].std() < 30
 
 
 def test_add_pitching_plus_reuses_precomputed_stuff_and_location_columns(
-    make_raw_df, small_stuff_thresholds, small_location_thresholds, monkeypatch, tmp_path
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, small_pitching_thresholds, monkeypatch, tmp_path
 ):
     # add_pitching_plus should not recompute stuff/location scores that are
     # already present; full_pipeline.py relies on this to avoid redundant work.
+    from pitching_plus.scripts import location, stuff
+
     raw = make_raw_df(n_per_type=300, pitch_types=("FF",), n_pitchers=10)
-    pre_scored = location.add_location_plus(stuff.add_stuff_plus(raw), models_dir=tmp_path, retrain=True)
+    pre_scored = location.add_location_plus(
+        stuff.add_stuff_plus(raw, models_dir=tmp_path, retrain=True), models_dir=tmp_path, retrain=True
+    )
 
     call_count = {"n": 0}
     real_add_location_plus = pitching.add_location_plus
@@ -123,3 +100,35 @@ def test_add_pitching_plus_reuses_precomputed_stuff_and_location_columns(
     monkeypatch.setattr(pitching, "add_location_plus", spy)
     pitching.add_pitching_plus(pre_scored, models_dir=tmp_path, retrain=False)
     assert call_count["n"] == 0
+
+
+def test_add_pitching_plus_cache_roundtrip_is_deterministic(
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, small_pitching_thresholds, tmp_path
+):
+    raw = make_raw_df(n_per_type=300, pitch_types=("FF",), n_pitchers=10)
+
+    trained = pitching.add_pitching_plus(raw, models_dir=tmp_path, retrain=True)
+    assert (tmp_path / "pitching_models.joblib").exists()
+
+    cached = pitching.add_pitching_plus(raw, models_dir=tmp_path, retrain=False)
+
+    pd.testing.assert_series_equal(trained["pitching_run_value"], cached["pitching_run_value"])
+
+
+def test_load_or_score_warns_on_stale_cache_fingerprint(
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, small_pitching_thresholds, monkeypatch, tmp_path
+):
+    # Regression coverage for the cache-staleness guard: previously (in
+    # location.py, before stuff.py/pitching.py ported the same pattern) a
+    # cache was reused purely based on file existence, so editing
+    # JOINT_FEATURES/HGB_PARAMS and calling with retrain=False would
+    # silently score against a stale model.
+    raw = make_raw_df(n_per_type=300, pitch_types=("FF",), n_pitchers=10)
+    pitching.add_pitching_plus(raw, models_dir=tmp_path, retrain=True)
+    assert (tmp_path / "pitching_cache_fingerprint.joblib").exists()
+
+    # Simulate a code change to the training config between the cache being
+    # built and this call, without retraining.
+    monkeypatch.setattr(pitching, "HGB_PARAMS", dict(pitching.HGB_PARAMS, max_depth=3))
+    with pytest.warns(UserWarning, match="different JOINT_FEATURES/HGB_PARAMS"):
+        pitching.add_pitching_plus(raw, models_dir=tmp_path, retrain=False)

@@ -3,7 +3,9 @@ import pandas as pd
 from pitching_plus.scripts import full_pipeline
 
 
-def test_run_pipeline_end_to_end(make_raw_df, small_stuff_thresholds, small_location_thresholds, tmp_path):
+def test_run_pipeline_end_to_end(
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, small_pitching_thresholds, tmp_path
+):
     # The four-stage chain (Stuff+ -> Location+ -> Pitching+ -> bestPitch+)
     # was previously only exercised piecewise, via each module's own tests
     # assembling the chain manually -- nothing called run_pipeline itself

@@ -779,3 +779,593 @@
   four modules) versus this branch's one-file-per-module layout is a style
   difference, not a missing capability -- not worth reverting the recent
   tests/ reorg for.
+
+# 9/4/2026: retooled Stuff+ from a PCA composite to a trained model
+
+- New branch rework/stuff-weighting, off main. User reviewed FanGraphs'
+  Stuff+/Location+/Pitching+ primer specifically on Stuff+'s methodology:
+  their real Stuff+ is trained against run value via a decision-tree model
+  capturing nonlinear physics-to-run-value relationships ("isn't only
+  outlierness, it's how specific outlier characteristics affect run value
+  generation"), not a variance-maximizing composite. This supersedes the
+  8/26 and 9/2 entries' "keep Stuff+ outcome-independent" verdict -- both
+  entries stay as history, not deleted; this entry documents the reversal
+  and why. The per-pitch score stays independent of THAT pitch's own
+  outcome throughout (out-of-fold CV, never a same-data fit), matching the
+  original ask ("the 'outcome' Stuff+ would still be independent of
+  result") -- what changed is that the WEIGHTS are now informed by run
+  value in aggregate, not that any single pitch's own result leaks into its
+  own score.
+- New design mirrors location.py's architecture: one
+  HistGradientBoostingRegressor per pitch type (same HGB_PARAMS as
+  location.py: max_depth=6, learning_rate=0.05, max_iter=300,
+  l2_regularization=1.0), 5-fold out-of-fold cross_val_predict against
+  delta_pitcher_run_exp, cached under pitching_plus/models/
+  (stuff_models.joblib, stuff_historical_scores.joblib,
+  stuff_cache_fingerprint.joblib) exactly like Location+'s cache.
+- Added a new feature, axis_differential: a seam-shifted-wake proxy, the
+  angular gap (wrapped to [0,180]) between Statcast's measured spin_axis and
+  the direction implied by observed movement (pfx_x/pfx_z, both already in
+  the raw data, already gravity-adjusted -- no trajectory re-derivation
+  needed): movement_angle = atan2(pfx_x, -pfx_z) mod 360; gap = |spin_axis -
+  movement_angle| wrapped to [0,180]. Under pure Magnus physics the two
+  should point the same way; a large gap means the ball's actual break
+  isn't explained by its bulk spin. Several naive atan2 sign/axis-order
+  combinations were tried first and did NOT produce a sane pattern -- the
+  `-pfx_z` sign flip was the one that did. Validated directly against the
+  full 3,565,743-row 2021-2025 dataset (read-only script, not the shipped
+  code path, as a first check): median gap by pitch type is FF 8.7 deg
+  (n=1,164,954), CU 9.3, KC 10.3, CH 12.4, SI 18.6, FS 20.6, FC 26.3,
+  SL 27.6, SV 29.1, ST 31.1. Matches the expected ordering: four-seamers and
+  curveballs (known highest spin efficiency, closest to pure Magnus) show
+  the tightest alignment; sinkers/splitters (known for real SSW) and
+  cutters/sliders/sweepers (known gyro-heavy) show larger gaps. Holds
+  separately by pitcher handedness (FF: RHP 8.5 / LHP 9.3; SI: RHP 19.5 /
+  LHP 16.5), so no per-hand mirroring is needed. Re-confirmed identically
+  through the actual shipped `add_stuff_plus` -> `_build_v1_features` path
+  during end-to-end validation below, not just the standalone check.
+  STUFF_FEATURES is now: release_speed, release_spin_rate,
+  release_extension, acceleration_mag, horizontal_acceleration,
+  movement_per_reaction_time, axis_differential.
+- Fixed the aggregate-vs-pitch-level calibration sigma bug proactively
+  (the same bug class fixed in location.py and pitching.py on 9/2 and 8/30,
+  flagged as unfixed here in the 9/2 review, and noted then as "low-impact
+  so far" only because physics variance is much smaller than run-value
+  variance relative to between-pitcher spread -- a justification that stops
+  holding once Stuff+ predicts delta_pitcher_run_exp directly, exactly as
+  noisy as location_run_value already proved to be, 7x too narrow before
+  its fix). stuff.py's new `_calibrate` fits agg_calibration (aggregate-
+  level, from the spread of pitcher-season means) and pitch_calibration
+  (pitch-level, from the real per-pitch stuff_run_value spread among
+  reliable arsenals) as two separate fits, mirroring location.py's
+  now-correct `_calibrate` pattern -- own local reimplementation in
+  stuff.py, not an import (location.py imports FROM stuff.py, so the
+  reverse would be circular). Confirmed working on real data below: pitch-
+  level std (9.70) tracks the aggregate std (8.7-10.3 by type) closely,
+  not the ~7x-too-narrow failure mode location.py had before its own fix.
+- REQUIRED_COLS grew to include TARGET_COL (delta_pitcher_run_exp) and
+  KEY_COLS (game_pk, at_bat_number, pitch_number, for OOF cache keying,
+  duplicated from location.py's constant of the same name/values -- can't
+  import it, same circular-import reason), plus pfx_x/pfx_z (for
+  axis_differential). Real, measured scope narrowing versus the old
+  physics-only REQUIRED_COLS, checked directly against the full dataset:
+  3,526,127 pitches were physics-complete under the old scope; 3,525,964
+  clear the new scope, a loss of 163 rows (0.005%) -- 143 missing pfx_x/
+  pfx_z, 20 missing delta_pitcher_run_exp (some overlap). Negligible.
+- Fixed two call sites that needed to pass models_dir/retrain through to the
+  now-caching add_stuff_plus: full_pipeline.py's `add_stuff_plus(df)` call
+  and pitching.py's `add_stuff_plus(raw_df)` call inside add_pitching_plus.
+  The second wasn't part of the original ask but is just as necessary --
+  bestpitch.py -> add_pitching_plus -> add_stuff_plus is a real call chain,
+  and every test exercising it passes an isolated tmp_path models_dir;
+  without this fix those tests would have silently trained against and
+  written into the real production pitching_plus/models/ cache using
+  synthetic test data. Also updated both scripts' `--retrain` CLI help text
+  (previously said "Retrain Location+ models," now mentions Stuff+ too).
+- bestpitch.py needed zero changes: it never scores a counterfactual
+  Stuff+ value, only reads a pitcher's real, already-computed stuff_plus/
+  stuff_plus_reliable from `_arsenal_wide`. location.py needed zero changes.
+- Test suite: rewrote test_stuff.py's PCA-sign-anchor assertion (no PCA
+  sign exists for a supervised model) into a check grounded in the
+  fixture's own engineered signal (release_speed's coefficient in the
+  fixture's delta_pitcher_run_exp formula) instead; added cache-roundtrip,
+  stale-fingerprint, and pitch-vs-aggregate-sigma regression tests mirroring
+  test_location.py's equivalents; added a direct axis_differential unit
+  test. conftest.py's shared fixture gained pfx_x/pfx_z (previously
+  absent), spin_axis is now a noisy function of pfx_x/pfx_z instead of
+  fully independent random (so axis_differential has real content to test
+  against, computed from a SEPARATE portion of the RNG stream added after
+  the existing balls/strikes/location/on-base draws so plate_x/plate_z/
+  noise's exact realized values are unaffected), and delta_pitcher_run_exp
+  now also depends on release_speed and horizontal_acceleration (small
+  terms relative to the existing location term) so stuff.py's GBM has
+  genuine signal to fit in tests, not just noise. Also fixed
+  small_stuff_thresholds' monkeypatch target (MIN_GROUP_SIZE_FOR_PCA ->
+  MIN_GROUP_SIZE_FOR_MODEL) and three test_pitching.py call sites that
+  called `stuff.add_stuff_plus(raw)` with no models_dir/retrain -- same
+  real-cache-pollution risk as the full_pipeline.py/pitching.py fixes
+  above, just in test code instead of production code. One of the three was
+  missed on the first pass (a `replace_all` edit matched two
+  `scored = location.add_location_plus(stuff.add_stuff_plus(raw), ...)`
+  call sites but not the third, assigned to `pre_scored` instead of
+  `scored`) and only surfaced as a UserWarning in the full suite's output,
+  not a failure -- the real production cache already existed (from this
+  entry's own end-to-end validation run below) and the missed call site's
+  retrain=False default meant it loaded that real cache rather than
+  training over it, so no corruption occurred (verified directly: cache
+  file mtimes/fingerprint unchanged and correct afterward), but it was a
+  live bug for the seconds it ran and a real gap in the first fix pass.
+  Fixed and reconfirmed warning-free.
+  Adding the new fixture terms shifted the RNG draw sequence enough to flip
+  test_location.py::test_add_location_plus_row_alignment_and_scope's
+  |plate_x|-vs-location_run_value correlation from a real (if weak, ~-0.1
+  to -0.3 depending on draw) negative relationship to a spurious +0.02 --
+  not a location.py regression, just that the location signal's original
+  magnitude (-0.05 coefficient against 0.3 noise, n=300) was only
+  marginally robust to begin with and a different random draw pushed it
+  over. Fixed by strengthening all three of the fixture's signal terms
+  (location coefficients 0.05 -> 0.12, release_speed 0.01 -> 0.025,
+  horizontal_acceleration 0.002 -> 0.004) rather than chasing bit-identical
+  RNG-stream reproduction across an evolving shared fixture. Full suite
+  (29 tests: 24 baseline + 5 new stuff.py tests) passes after the fix.
+- Full end-to-end validation against the real 3,565,743-row 2021-2025
+  dataset (via the actual `add_stuff_plus`/`add_location_plus` entry
+  points, not a standalone reimplementation):
+    - Training: loading the raw CSV took ~78-79s (I/O, unchanged by this
+      retool); `add_stuff_plus(raw, retrain=True)` itself took 79.2s --
+      faster than location.py's own 94-340s baseline on the same dataset
+      (7 features vs. Location+'s 13, otherwise identical N_FOLDS/
+      HGB_PARAMS/row counts per type). 3,525,964 / 3,565,743 pitches scored
+      (98.9%).
+    - Calibration sanity: reliable-population stuff_plus lands on exactly
+      100.0 for every pitch type (by construction), with std 8.7-10.3
+      across types (CH 10.1, CU 8.7, FC 10.3, FF 10.0, FS 9.8, KC 9.8,
+      SI 10.0, SL 9.6, ST 9.7, SV 9.5) -- a sane "+"-stat spread matching
+      STUFF_SCALE_K=0.10's "roughly +/-10 points per SD" design intent.
+      pitch_stuff_plus overall: mean 99.97, std 9.70; stuff_plus
+      (broadcast) overall: mean 101.46, std 10.11 -- pitch-level and
+      aggregate-level spreads track closely, confirming the proactive
+      sigma-split fix above works on real data, not just the
+      synthetic test fixture.
+    - pitching.py's blend, refit fresh against the new stuff_plus
+      distribution (no code change needed there): beta_stuff=+0.0041,
+      beta_loc=+0.0055 -- both positive (higher Stuff+/Location+ still
+      predicts better run value for the pitcher, same sign convention as
+      before) and comparable in magnitude, not degenerate. Weighted
+      aggregate-level R^2 = 0.123 (stuff-alone 0.055, location-alone
+      0.061, on the same 14,343 reliable pitcher-pitch-type-season rows
+      the 8/26 entry's PCA-era comparison used). This is an improvement
+      over the old PCA composite's own numbers from that entry (stuff-alone
+      R^2 ~0.02, combined ~0.08, location-alone ~0.05): the new run-value-
+      trained Stuff+ is ~2.7x more predictive of run value on its own, and
+      the combined blend's R^2 improved by roughly 54%. Directly supports
+      the retool's premise -- weighting physics characteristics by how they
+      actually relate to run value, instead of by variance alone, produces
+      a more informative signal, not just a differently-shaped one.
+  Not yet done: rebuilding notebooks/stuff.ipynb to match (still describes
+  the PCA-era design; would need a full rebuild like bestpitch.ipynb got on
+  9/2, not attempted here) and re-running fg_pitching.ipynb's joint-model
+  comparison against the new Stuff+ (that comparison's conclusion --
+  "the blend beats a jointly-trained model" -- was about Pitching+'s own
+  architecture, not Stuff+'s internal design, so it isn't invalidated by
+  this change, but hasn't been re-verified against the new numbers either).
+
+# 9/4/2026 (cont'd): brought the notebooks up to date, and found a real leak doing it
+
+- User asked to bring notebook documentation up to date with the retool, then
+  check the writing with the avoid-ai-writing skill. Three notebooks directly
+  depend on Stuff+ and needed real work, not just a find-replace: stuff.ipynb
+  (rebuilt), pitching.ipynb (re-executed, one stale claim fixed), and
+  fg_pitching.ipynb (re-executed, and a real leak found and fixed along the
+  way -- see below). bestpitch.ipynb was checked and needs no text changes
+  (it never describes Stuff+'s internals, just consumes the stuff_plus
+  column), but its own numbers are technically stale too; re-running it
+  wasn't attempted here (its counterfactual search alone took 910s on the
+  full dataset per the 9/2 entry -- deliberately deferred, not an oversight).
+- stuff.ipynb: rebuilt from scratch rather than patched. The old version
+  reimplemented the full V1/V2 feature engineering and hand-rolled PCA
+  inline; none of that logic exists anymore, so patching it in place would
+  have meant rewriting nearly the whole notebook anyway. The new version
+  calls the real `add_stuff_plus` directly (mirroring how pitching.ipynb/
+  bestpitch.ipynb already work) instead of reimplementing the model, and
+  keeps only what's still notebook-shaped: the axis_differential
+  derivation/validation, leaderboards, and a rerun of the CSW% outcome
+  diagnostic. Executed end-to-end (`jupyter nbconvert --execute`, ~32s
+  total: 25s load + 7s score from cache) rather than left with
+  standalone-script-verified-but-unexecuted numbers, since the cache made
+  that cheap enough this time (the 9/2 CSW% diagnostic wasn't executed
+  in-notebook for exactly the opposite reason -- retraining was too
+  expensive before caching existed).
+  Real results: axis_differential's median-gap ordering matches the
+  standalone check already in this file's 9/4 entry above (FF 8.7 ... ST
+  31.1). The CSW% rerun is a genuine improvement, not just a reshuffling:
+  pooled Spearman rho +0.136 (p=9.6e-17, n=3,721, same population as the old
+  PCA-era check) vs. the old +0.078 (p=2e-6) -- and every one of the nine
+  pitch types now shows a positive point estimate, where the old composite
+  had two negative ones (CH -0.056, FS -0.141, both now positive: +0.169,
+  +0.036). This is the diagnostic that originally flagged the old design's
+  weak spot, and it lines up with the R^2 improvement already measured
+  above (stuff-alone 0.02 -> 0.055 combined 0.08 -> 0.123).
+- pitching.ipynb: re-executed end-to-end (38 cells, ~26s to load +
+  score). Found one stale factual claim in the process, not just stale
+  numbers: cell 5's sanity check said "`stuff.py` sign-anchors its PCA
+  composite," a real property of the old design with no equivalent for a
+  supervised model. Fixed the markdown and the print statement's own
+  conclusion text before re-running (own release_speed vs. own
+  pitch_stuff_plus correlation is still strongly positive everywhere, 0.07
+  to 0.51 by pitch type, now framed as an empirical expectation for a real
+  predictor of run value, not a built-in guarantee). Every downstream
+  number moved (expected, since they're all computed from the new
+  stuff_plus), but the qualitative story didn't: Location+ still dominates
+  at the pitch level, Stuff+ still needs a much larger sample to show its
+  full relationship (its R^2 now leads Location+'s starting from the lowest
+  threshold tested, 20 pitches, versus needing several hundred before under
+  the old design) and is still the far stickier season-to-season skill
+  (0.84 vs. 0.42, versus the old ~0.89/~0.41). What did change materially:
+  Stuff+'s own standalone aggregate R^2 roughly tripled (0.02 -> 0.059,
+  matching the standalone check above) and its standardized beta closed
+  most of the gap with Location+'s (was roughly half Location+'s magnitude,
+  now 0.166 vs. 0.206, within 20%). Rewrote the closing "Reconciling"
+  synopsis cell with the real numbers rather than leaving 8/27-era figures
+  in place next to a freshly-run notebook.
+- fg_pitching.ipynb: this is the one that mattered. Before executing,
+  read every markdown cell for stale claims (the same check that caught
+  pitching.ipynb's sign-anchoring line) and found a real methodological
+  problem, not just stale prose: cell 5's own caveat said Stuff+ "keeps one
+  small asymmetry" in this notebook's train/2021-2024-test/2025 holdout
+  design -- its loadings are fit pooled across all five seasons, called "a
+  much weaker form of leakage than a supervised model training on
+  individual future outcomes (a shared direction-of-variance across years,
+  not memorized results)." That description was accurate for the PCA-era
+  Stuff+ (never touches outcome data, so pooling seasons couldn't leak
+  results) and is no longer accurate for the retooled one: `add_stuff_plus`
+  now trains directly against `delta_pitcher_run_exp`, and the notebook's
+  "fair comparison" cell was scoring the blend's Stuff+ input from the
+  pooled production cache -- meaning 2025's own outcomes were leaking into
+  the blend's 2025 score in a comparison whose whole point is a strict,
+  leak-free holdout.
+  Fixed by giving Stuff+ the identical train-only treatment Location+
+  already had in this same notebook: refit `stuff_mod._train_models`
+  on `train` (2021-2024) only, score `test` (2025) by direct prediction.
+  Simplified along the way -- realized the blend's own z-scoring step
+  already standardizes per-(pitch_type, season) before pooling across
+  types, so raw `stuff_run_value` (already the same units as
+  `location_run_value`: a direct run-value prediction) works as the blend
+  input without needing stuff.py's 100+ ratio-scale/log round trip at all;
+  removed `log_stuff` throughout in favor of `stuff_run_value`.
+  The fix reverses the notebook's headline conclusion. Old (leaky)
+  result: blend holdout R^2=0.0523 beat the joint model's 0.0386. New
+  (leak-fixed) result: the joint model's holdout R^2=0.0452 beats the
+  blend's 0.0353 -- and every joint-model variant tested in this notebook
+  (raw features, three regularized configs, and the two-calibrated-inputs
+  version) now beats the blend too, where before the blend beat all of
+  them. The joint model's own numbers didn't move at all between the two
+  runs (it was never fed the leaky cache); only the blend's score changed,
+  which is exactly what confirms the leak was the cause, not
+  re-run-to-rerun noise from unrelated changes.
+  Rewrote every downstream section that was built to explain the old
+  result (the regularization sweep, the calibrated-inputs experiment, the
+  closing synopsis) rather than just refreshing numbers in place, since
+  their original framing ("does X help the joint model close the gap to
+  the blend") no longer has a gap to close. The individual sub-findings
+  mostly still hold and were kept, reframed: regularizing the joint model
+  here still makes it worse, not better (every regularized variant holds
+  up worse on the 2025 holdout than the original untuned config); the
+  two-calibrated-inputs variant still falls short of the raw-feature
+  joint model's absolute holdout R^2, though it now has the single best
+  (lowest) shrinkage of any variant tested, blend included.
+  This is flagged as an open question for the user, not resolved here:
+  `pitching.py`'s production Pitching+ is currently the weighted blend,
+  and that choice was partly justified by this exact notebook's original
+  (leaky) comparison. The honest, leak-fixed version of that comparison no
+  longer supports it -- a jointly-trained model now generalizes better in
+  this specific rerun. That changes what the data recommends, but deciding
+  whether to rebuild `pitching.py` around a joint model is a
+  production-architecture decision, not something to change as a side
+  effect of a notebook-documentation pass. No code in `pitching_plus/
+  scripts/` was touched by this finding.
+- Full pytest suite unaffected by any of this (no scripts changed in this
+  entry, only notebooks); last verified green in the entry above.
+
+# 9/4/2026 (cont'd): leave-one-season-out check -- the joint model wins in every fold
+
+- The prior entry's finding (jointly-trained model beats the weighted blend once
+  the Stuff+ leak is fixed) rested on exactly one train/test split: train
+  2021-2024, test 2025, the only holdout fg_pitching.ipynb has ever used, out of
+  only 5 available seasons. Real risk that a single split is a 2025-specific
+  artifact rather than a robust property. Before touching production code
+  (`pitching.py`/`bestpitch.py`), ran a leave-one-season-out (LOSO) check:
+  rotate the held-out season across all 5 (2021-2025), retraining the joint
+  model and both blend inputs (Stuff+, Location+, both train-only per the
+  leak fix) fresh on each fold's 4-season train set, scoring on the held-out
+  season. Scoped to the core comparison only (original hyperparameters, no
+  regularization or calibrated-inputs variants -- those weren't part of what
+  needed re-validating).
+- Pre-committed pass bar, decided before running: joint model beats the blend's
+  holdout R^2 in >= 4/5 folds AND the mean holdout R^2 gap across all 5 folds is
+  positive. New cells appended to fg_pitching.ipynb (after cell 21) rather than
+  a separate script, reusing `engineered`/`JOINT_FEATURES`/`weighted_r2` and the
+  exact train-only-refit/aggregate/WLS pattern the existing cells already
+  established. Fold logic kept in a pure function taking `engineered` and
+  `held_out_season`, returning a plain dict -- deliberately does not touch the
+  module-level `train`/`test` globals the rest of the notebook depends on, so
+  an out-of-order rerun of earlier cells can't get silently corrupted by the
+  loop's own state.
+- Result: **5/5 folds**, joint model beats the blend in every one. Per-season
+  holdout R^2 (blend / joint): 2021 0.0937/0.1009, 2022 0.0966/0.1096, 2023
+  0.1097/0.1211, 2024 0.0834/0.0939, 2025 0.0353/0.0452. Gap is consistently
+  positive (+0.0072 to +0.0130, mean +0.0104) -- no season is an outlier in the
+  gap itself, though 2025's absolute R^2 is unusually low for both approaches
+  compared to the other four seasons (a real, separate observation: 2025 looks
+  like a harder season to predict generally, not a reason the joint model's
+  edge happened to show up there specifically). Total runtime: 756s for all 5
+  folds (~74s/fold for the joint model's training, ~78s/fold for the blend
+  inputs' train-only refits), on top of the ~34s data load already paid
+  earlier in the notebook. Full re-execution of the whole notebook (all 27
+  cells, fresh kernel) took under 15 minutes total.
+- **Verdict: passes cleanly, at the strongest possible outcome.** The original
+  single-split result was not a 2025-specific artifact. **Stage B of the
+  migration plan is authorized to proceed**: rearchitecting `pitching.py` and
+  `bestpitch.py` around a per-pitch-type jointly-trained model
+  (`HistGradientBoostingRegressor` on `STUFF_FEATURES + LOCATION_FEATURES`
+  against `delta_pitcher_run_exp`, mirroring `stuff.py`'s own architecture),
+  replacing the WLS blend and its `_apply_blend`/`_fit_pitching_plus_model`
+  internals. See the plan at the time of this entry (working from
+  `C:\\Users\\choul\\.claude\\plans\\tidy-wibbling-nygaard.md`) for the full
+  design, including a real correctness risk identified during planning:
+  `bestpitch.py`'s `_build_base_array` zone-dedup key is currently a bijection
+  over game-state + handedness only, which stops being true once
+  pitcher-varying physics features are folded into the same array -- the dedup
+  key needs to also discriminate on `(pitcher, season)` or counterfactual
+  scoring would silently combine different pitchers' physics.
+- No code in `pitching_plus/scripts/` touched by this entry -- only
+  `fg_pitching.ipynb` (the new LOSO cells) and this dev_log entry. Full pytest
+  suite unaffected, still green as of the entry above.
+
+# 9/4/2026 (cont'd): Stage B -- Pitching+/bestPitch+ rearchitected as a joint model
+
+- Stage A passed 5/5 -- this entry is Stage B, rearchitecting `pitching.py`
+  and `bestpitch.py` around the jointly-trained model per the migration
+  plan. Sequenced `pitching.py` first (tested fully in isolation), then
+  `bestpitch.py` (depends on `pitching.py`'s new cache/calibration).
+
+- **`pitching.py` rewrite**: replaced `_apply_blend`/`_fit_pitching_plus_model`
+  with a `_train_models`/`load_cached_models`/`_cache_fingerprint`/
+  `_load_or_score`/`_calibrate` architecture mirroring `stuff.py`'s retool
+  exactly -- one `HistGradientBoostingRegressor` per pitch type on
+  `JOINT_FEATURES = STUFF_FEATURES + LOCATION_FEATURES` (20 features: 7
+  physics + 13 location/count) against `delta_pitcher_run_exp`, 5-fold OOF
+  CV, cached under `pitching_plus/models/` (`pitching_models.joblib`,
+  `pitching_historical_scores.joblib`, `pitching_cache_fingerprint.joblib`)
+  with the same fingerprint-staleness warning. Reused `location.py`'s
+  `_ratio_calibration`/`_to_100_scale` directly via import instead of
+  duplicating them (no circular-import constraint here, unlike `stuff.py`).
+  `_score_pitching_plus` was split into two composable pieces:
+  `_calibrate_raw_value` (apply an already-fitted 100+ calibration to a raw
+  value, real or hypothetical) and `_score_pitching_plus` (predict via
+  per-pitch-type models, then calibrate) -- `bestpitch.py`'s target-averaging
+  machinery computes its own raw predictions and only needs the calibration
+  half. `_calibrate` now returns `pitch_calibration` itself (not just
+  applies it), since `bestpitch.py` needs the table, not just already-scored
+  rows. Public contract unchanged: same `add_pitching_plus` signature, same
+  three output columns.
+- Real-data validation: full retrain on the 3,565,743-row dataset --
+  `add_stuff_plus` 176s, `add_location_plus` 427s, `add_pitching_plus` 539s
+  (includes a real, accepted redundancy: `add_pitching_plus` re-runs
+  `stuff_mod._build_v1_features`/`location_mod._build_features` on its own
+  in-scope population rather than threading through what `add_stuff_plus`/
+  `add_location_plus` already built, mirroring this codebase's existing
+  convention of each module building its own working frame independently).
+  Calibration lands exactly on 100.0 for every pitch type (std 9.0-9.9,
+  matching the "~10 points per SD" design intent); pitch-level std (9.17)
+  tracks the aggregate-level std (8.49) closely -- the dual-level sigma
+  split was implemented correctly from day one here, unlike the PCA-era
+  `stuff.py`/pre-9/2 `location.py`, so there was no bug to find, only a
+  clean confirmation.
+- All 6 `test_pitching.py` tests pass: the 3 architecture-independent ones
+  survive with `small_pitching_thresholds` added (a **new fixture**,
+  required because `pitching.py` now has its own `MIN_GROUP_SIZE_FOR_MODEL`
+  gate -- and because it imports `MIN_PITCHES_FOR_SCORE` from `stuff.py` via
+  `from module import name`, a one-time binding at import that
+  `monkeypatch.setattr(stuff, ...)` cannot reach after the fact, so
+  `pitching.py`'s own constants need their own fixture regardless of what
+  `stuff.py`'s says); `test_pitch_level_calibration_uses_its_own_spread_not_the_aggregates`
+  and `test_apply_blend_level_dispatch_actually_uses_the_right_sigma`
+  (blend-internals tests with nothing left to test) were replaced by
+  `test_pitch_pitching_plus_calibration_uses_pitch_level_spread_not_the_aggregates`,
+  mirroring `stuff.py`'s own sigma-split regression test; 2 new tests added
+  (cache-roundtrip determinism, stale-fingerprint warning), mirroring
+  `stuff.py`'s suite.
+
+- **`bestpitch.py` rewrite**: `_arsenal_wide` (a `cand_stuff_<type>` scalar
+  per pitcher-season) replaced by `_arsenal_physics_avg` (a full
+  `STUFF_FEATURES` vector per pitcher-pitch_type-season, renamed to
+  `cand_<feature>` to avoid colliding with a row's own real physics columns
+  on the same working frame). `_build_base_array` now builds a
+  `JOINT_FEATURES`-wide array and takes a `physics_cols` parameter selecting
+  which columns to read physics from (a row's own real `STUFF_FEATURES` for
+  `_actual_smoothed_pitching_plus`, or a candidate's `cand_<feature>`
+  columns for `_search_best_pitching_plus`).
+- **Real bug found and fixed during planning, before any code was written**:
+  `_build_base_array`'s `center_key` dedup was a genuine bijection over
+  game-state + handedness alone (`re288_state * stand_R * p_throws_R`,
+  <=1,152 keys) under the old location-only model, because every
+  non-location feature besides the 3 varying ones was constant across
+  pitchers for a fixed game-state. That stops being true once
+  pitcher-varying physics are folded into the same array -- two rows
+  sharing a game-state but belonging to different pitchers are NOT
+  interchangeable, and deduping them together would silently score one
+  pitcher's candidate with another pitcher's physics. Fixed by extending
+  `center_key` (and the `zh_key` derived from it) to also discriminate on
+  `(pitcher, season)` via `dedup_by_pitcher_season=True` -- a compact id
+  factorized from `pitcher_season_gamestate`, folded into the key before any
+  row ever gets deduplicated. `_actual_smoothed_pitching_plus` uses
+  `dedup_by_pitcher_season=False` instead (a trivial per-row key): physics
+  there is each pitch's own real, continuously-varying measurement, not a
+  per-pitcher-season average, so no two rows are genuinely interchangeable
+  and there's no real dedup benefit to chase -- `np.unique` on an
+  already-unique key is a no-op split, not a bug, letting both callers share
+  the identical downstream averaging code. Added
+  `test_batched_target_averaging_matches_unbatched_reference_with_varying_pitcher_physics`,
+  which builds a fixture with multiple pitchers sharing a game-state, gives
+  each distinct candidate physics, and confirms the batched path matches an
+  unbatched per-row reference -- a reverted, game-state-only key fails this
+  by borrowing one pitcher's physics for another's row.
+
+- **Second real bug, found only by running on the full dataset, not caught
+  by any test or by planning**: the existing `_all_zones_target_averaged_*`
+  optimization (batch every candidate zone into 2 `model.predict()` calls
+  per pitch type instead of 2 per zone) was safe under the old location-only
+  key because its dedup ceiling was a hard <=1,152, so the `n_zones`
+  multiplier (13x) never produced more than a few tens of thousands of rows
+  per predict() call regardless of population size. Once `center_key` also
+  discriminates by pitcher-season, that ceiling disappears: a pitch type
+  thrown selectively by many pitchers in a narrow, scattered set of
+  situations (a show-me curveball, not a bread-and-butter fastball) barely
+  dedupes at all, so `n_zones * 3 * k` (or `* 2 * m`) rows can reach the tens
+  of millions. Measured directly: on the real 2021-2025 dataset, the
+  candidate-population for CU (curveball) is 1,687,435 rows across 1,360
+  pitcher-seasons -- *smaller* than FF's 3,235,576 rows across 3,381
+  pitcher-seasons -- yet CU's single build-and-predict step ran over 3 hours
+  and consumed 15+ GB of RAM (confirmed live via `Get-Process`: 15,567
+  CPU-seconds accumulated against ~52 minutes of wall-clock time, i.e.
+  genuinely running hot across ~5 cores, not merely slow), before being
+  killed, while FF's own step added only ~800s. The likely reason CU fared
+  worse despite a smaller population: a pitch thrown narrowly by many
+  pitchers in a scattered set of situations has far less (pitcher,
+  game-state) repetition than a bread-and-butter pitch thrown by fewer,
+  heavier-volume arms in nearly every count -- a much higher unique-key
+  ratio relative to row count, which is exactly what the `n_zones` multiplier
+  then amplifies. Fixed by removing the all-zones batching from
+  `_search_best_pitching_plus` entirely, reverting to a per-zone loop
+  (mirroring `_actual_smoothed_pitching_plus`'s already-adopted pattern) --
+  `_all_zones_target_averaged_pitching_run_value` is now dead code and was
+  deleted rather than left unused. Validated the fix in isolation before
+  re-running the full dataset: CU's entire 13-zone search (the pathological
+  case) dropped from >10,800s (killed before finishing) to 341s.
+- **Caveat on the full-dataset re-timing run**: after the fix, the first
+  108/130 candidates completed in a clean ~2,709s (~45 min, matching the
+  isolated CU test's per-candidate rate). A single gap then appeared between
+  candidates 108 and 109 (`ST` zone 4 to zone 5 -- an unremarkable, small
+  pitch type, not a repeat of the CU pathology) of 18,321s, coinciding with
+  an overnight period during which the session's own clock rolled over a
+  calendar day while waiting on this exact run. Every candidate immediately
+  before and after that gap completed in single-digit-to-low-double-digit
+  seconds, with no corroborating evidence of heavy computation during the
+  gap (unlike the CU bug, which was directly confirmed via live process
+  memory/CPU inspection before it was fixed) -- this has the signature of
+  the machine sleeping mid-run, not a second code-level bug, but is reported
+  as an open, not fully certain, attribution rather than dismissed outright.
+  Subtracting that one gap from the reported 21,330s total gives **~3,009s
+  (~50 min)** as the real, corrected search time -- about 3.3x the
+  pre-migration 910s baseline, a real and measurable slowdown but the kind
+  the migration plan explicitly anticipated (each candidate now costs a real
+  `model.predict()` call plus a weakened dedup ceiling, not a closed-form
+  blend over two scalars), not the >20x catastrophic regression the
+  unfixed bug actually produced.
+- Distribution sanity, same checklist as every other stage of this
+  migration: `pitch_bestpitch_plus` mean 9.16, median 7.48, std 8.36, max
+  100.09, **100.00% non-negative** (n=3,521,210) -- meets or exceeds the
+  "positive or close to 0 for nearly every pitch" contract even more
+  cleanly than any prior version of this metric (99.1%-99.95% in earlier,
+  pre-migration runs per the 8/30 and 8/31 entries). Leaderboard eyeballed
+  for plausibility: top `pitching_plus` names are deGrom, Glasnow, Treinen,
+  Burnes (appearing twice, different seasons/pitch types), Cole -- real,
+  known plus-stuff arms, not small-sample noise; the closest-to-optimal
+  `bestPitch+` list surfaces known-command names (deGrom again, among
+  others), consistent with the pattern the 8/27 entry found for the
+  original location-based command leaderboard.
+- Full pytest suite (32 tests, including the new
+  `test_batched_target_averaging_matches_unbatched_reference_with_varying_pitcher_physics`
+  and `test_arsenal_physics_avg_only_uses_reliable_rows`) passes after both
+  fixes.
+
+- **Documentation**: `purpose.md`'s Pitching+ section rewritten to describe
+  the joint-model design (mirroring the phrasing already used for Stuff+'s
+  own retooled section). `pitching.py`'s module docstring rewritten from
+  scratch -- removes the stale 0.052/0.039 blend-won numbers, describes the
+  joint model, and explicitly supersedes (not deletes) the 8/26/8/31
+  framing, pointing to this entry and the two before it for the reversal's
+  full history. `README.md` checked, needs no change (its one relevant line
+  is generic enough to remain accurate).
+- Not done in this entry: no new branch was cut for Stage B (stayed on
+  `rework/stuff-weighting`, per the plan's own framing of a separate branch
+  as a suggestion, not a requirement, for a branch that hasn't been merged
+  yet). `notebooks/bestpitch.ipynb` and `notebooks/pitching.ipynb` were not
+  re-executed against the new Pitching+ architecture -- both notebooks'
+  own numbers are now stale relative to what's shipped in
+  `pitching_plus/scripts/`, a known gap in the same spirit as the 9/4
+  "brought the notebooks up to date" entry's own deliberately-deferred
+  `bestpitch.ipynb` rerun, now compounded by this migration. Worth a future
+  pass, not blocking.
+
+# 9/8/2026: avoid-ai-writing audit + code-simplification pass on the retool
+
+- Ran two pre-ship checks against this branch's staged diff (the Stuff+/
+  Pitching+/bestPitch+ retool above) using Claude Code's `avoid-ai-writing`
+  and `code-simplification` skills: an audit of the new comments/docstrings,
+  and a simplification pass on the four changed scripts.
+- avoid-ai-writing: swept `stuff.py`, `pitching.py`, `bestpitch.py`,
+  `full_pipeline.py`, `purpose.md`, and this file's new 9/4 entries against
+  the skill's word list (delve, leverage, robust, seamless, testament to,
+  etc.), confidence-calibration filler ("notably," "worth noting"), and
+  vague attributions. Zero hits in the four scripts and `purpose.md`; the
+  only near-hits (this file's own "robust"/"harness"/"leverage" uses)
+  turned out to be legitimate statistical/ML/baseball terms of art (a
+  regression coefficient's robustness, an evaluation harness, count
+  leverage), not filler. The one stylistic pattern actually present --
+  heavy `--` parenthetical-dash use -- is a pre-existing, consistent
+  convention across the whole codebase (confirmed at a comparable rate,
+  roughly 7-9 per 1,000 words, in the untouched `location.py`), not
+  something this diff introduced, so left alone rather than de-dashing only
+  the touched files and making the codebase's voice inconsistent. No edits
+  made for this half of the pass.
+- Code simplification: read all four changed scripts against the skill's
+  structural/duplication/naming checklist. Two candidates considered and
+  rejected under Chesterton's Fence:
+    - The near-identical `_train_models`/`_cache_fingerprint`/
+      `_load_or_score` trio duplicated across `stuff.py`/`location.py`/
+      `pitching.py` (~80 lines each) is a real DRY violation on its face,
+      but it's a deliberate, repeatedly-documented convention -- each
+      module's own docstrings say it mirrors the others' architecture so it
+      can be read standalone, `stuff.py` explains why it can't import from
+      `location.py` (circular), and `pitching.py` already reuses
+      `location.py`'s `_ratio_calibration`/`_to_100_scale` directly
+      wherever no such constraint applies. Sharing this trio would also
+      require touching `location.py`, outside this diff's scope. Left as-is.
+    - `stuff.py`'s own `load_cached_models` is, by its own docstring's
+      admission, also currently uncalled ("included for architectural
+      parity"), the same shape as the item actually removed below. Kept
+      anyway: it's a 7-line pure wrapper, `pitching.py`'s copy of the same
+      function IS called (by `bestpitch.py`), and `location.py`'s copy is
+      called from a notebook -- cheap enough, and consistent enough with
+      real usage elsewhere, not to be worth removing.
+  Two changes applied:
+    - Removed `pitching.py`'s `_score_pitching_plus`: dead code introduced
+      by this same retool. Its own docstring already admitted bestPitch+'s
+      real search path calls `_calibrate_raw_value` directly instead of it;
+      confirmed via grep across `scripts/`, `tests/`, and `notebooks/` that
+      nothing calls it (the one hit, `bestpitch.ipynb`'s markdown, names a
+      pre-retool function with a completely different signature and was
+      already stale before this pass). Also fixed `load_cached_models`'s
+      docstring, which still claimed bestPitch+ scores through it.
+    - `bestpitch.py`'s `_build_base_array` did a repeated
+      `physics_cols[STUFF_FEATURES.index(col)]` list search per
+      STUFF_FEATURES column inside its per-pitch-type setup loop. Replaced
+      with one `dict(zip(STUFF_FEATURES, physics_cols))` built up front,
+      matching the cleaner zip-based pattern `_predict_at_point` (a few
+      lines above it in the same file) already uses for the identical
+      mapping. No behavior change -- 7 items, built once per pitch type, so
+      this was never a real cost, just a needless indirection to read.
+  Also fixed, found during the same pass, not really a "simplification":
+  `full_pipeline.py`'s `--retrain` CLI help text still said "Retrain
+  Stuff+/Location+ models," stale since this retool made Pitching+ (and by
+  extension bestPitch+, which calls `add_pitching_plus`) retrain under that
+  same flag too. The other three scripts' help text was already corrected
+  during the retool itself; this one copy was missed.
+- Full pytest suite (32 tests) reconfirmed green after both edits.
+  Separately, a real-data smoke run of the full pipeline was underway from
+  the prior verification pass (stuff/location/pitching via cache, ~40s
+  each on the full 3.57M-row dataset; bestPitch+'s counterfactual search
+  in progress) and unaffected by these edits, since neither touches scoring
+  logic or column names.

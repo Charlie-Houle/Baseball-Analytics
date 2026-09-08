@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pitching_plus.scripts import bestpitch, location, pitching
+from pitching_plus.scripts import bestpitch, pitching
 
 
 def test_add_bestpitch_plus_missing_columns_raises():
@@ -11,7 +11,7 @@ def test_add_bestpitch_plus_missing_columns_raises():
 
 
 def test_add_bestpitch_plus_junk_and_best_meets_or_exceeds_actual(
-    make_raw_df, small_stuff_thresholds, small_location_thresholds, tmp_path
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, small_pitching_thresholds, tmp_path
 ):
     raw = make_raw_df(
         n_per_type=300, pitch_types=("FF", "SL", "CU"), junk_pitch_types=("KN",),
@@ -36,7 +36,7 @@ def test_add_bestpitch_plus_junk_and_best_meets_or_exceeds_actual(
 
 
 def test_add_bestpitch_plus_own_pitch_always_a_candidate_even_if_unreliable(
-    make_raw_df, small_stuff_thresholds, small_location_thresholds, tmp_path
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, small_pitching_thresholds, tmp_path
 ):
     # Regression test for the "reliable arsenal" gate breaking the module's
     # own documented invariant (docs/dev_log.md 9/2 entry): a pitch type a
@@ -66,20 +66,23 @@ def test_add_bestpitch_plus_own_pitch_always_a_candidate_even_if_unreliable(
     assert (cu_rows["pitch_bestpitch_plus"] >= -1e-6).all()
 
 
+def _game_state_key(df):
+    return (
+        df["re288_state"].to_numpy() * 2 + (df["stand"] == "R").to_numpy().astype(int)
+    ) * 2 + df["p_throws_R"].to_numpy()
+
+
 def test_batched_target_averaging_matches_unbatched_reference_with_varying_zone_height(
-    make_raw_df, small_stuff_thresholds, small_location_thresholds, tmp_path
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, small_pitching_thresholds, tmp_path
 ):
     # Equivalence test for the batched, deduplicated target-averaging path
-    # (_build_base_array / _batched_target_averaged_location_run_value)
-    # against the original per-row reference (_predict_at_point). The
-    # batched path's docstrings claim this equivalence was "verified... on
-    # synthetic data with a stub model," but that check was never a
-    # checked-in test, and tests/conftest.py used to hold sz_top/sz_bot
-    # constant across every row, so the ZONE_HEIGHT_DEDUP_ROUND_FT bucketing
-    # -- the part of the batching that actually depends on zone height
-    # varying -- was never exercised (docs/dev_log.md 9/2 entry).
-    # conftest.py's fixture now draws sz_top/sz_bot per row, so this test
-    # has real variation to check against.
+    # (_build_base_array / _batched_target_averaged_pitching_run_value)
+    # against the original per-row reference (_predict_at_point), for the
+    # actual-pitch scoring path (dedup_by_pitcher_season=False -- physics
+    # here is each row's own real, per-pitch value, so the dedup key is
+    # trivial/per-row, exercising only the zone-height bucketing logic, not
+    # the pitcher-season discrimination the candidate-search path needs;
+    # see the test below for that).
     raw = make_raw_df(n_per_type=300, pitch_types=("FF",), n_pitchers=10)
     scored = pitching.add_pitching_plus(raw, models_dir=tmp_path, retrain=True)
 
@@ -88,19 +91,22 @@ def test_batched_target_averaging_matches_unbatched_reference_with_varying_zone_
         .dropna(subset=bestpitch.REQUIRED_COLS + ["stuff_plus"])
         .copy()
     )
-    engineered = bestpitch._build_features(in_scope)
+    engineered = bestpitch.stuff_mod._build_v1_features(in_scope)
+    engineered = bestpitch._build_features(engineered)
     engineered[bestpitch.ZONE_COL] = in_scope[bestpitch.ZONE_COL].to_numpy()
 
-    models = location.load_cached_models(tmp_path)
+    models = pitching.load_cached_models(tmp_path)
     model = models["FF"]
     base = engineered[engineered[bestpitch.PITCH_TYPE_COL] == "FF"].head(40)
     # Confirm the fixture actually varies zone height -- otherwise this
     # test couldn't distinguish correct dedup bucketing from a bug at all.
     assert (base["sz_top"] - base["sz_bot"]).nunique() > 1
 
-    array, p_throws_is_R, zone_height, center_key = bestpitch._build_base_array(base)
+    array, p_throws_is_R, zone_height, center_key = bestpitch._build_base_array(
+        base, physics_cols=bestpitch.STUFF_FEATURES, dedup_by_pitcher_season=False,
+    )
     center_x, center_z = base["plate_x"].mean(), base["plate_z_rel"].mean()
-    batched = bestpitch._batched_target_averaged_location_run_value(
+    batched = bestpitch._batched_target_averaged_pitching_run_value(
         model, array, p_throws_is_R, zone_height, center_key, center_x, center_z
     )
 
@@ -113,7 +119,99 @@ def test_batched_target_averaging_matches_unbatched_reference_with_varying_zone_
         (center_x, center_z - z_offset),
     ]
     reference = np.mean(
-        [bestpitch._predict_at_point(base, model, bestpitch.NON_LOCATION_FEATURES, px, pz) for px, pz in points],
+        [
+            bestpitch._predict_at_point(base, model, bestpitch.STUFF_FEATURES, bestpitch.NON_LOCATION_FEATURES, px, pz)
+            for px, pz in points
+        ],
+        axis=0,
+    )
+
+    np.testing.assert_allclose(batched, reference, atol=1e-6)
+
+
+def test_batched_target_averaging_matches_unbatched_reference_with_varying_pitcher_physics(
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, small_pitching_thresholds, tmp_path
+):
+    # Regression test for the pitcher-season dedup-key fix this migration
+    # made (docs/dev_log.md's Pitching+ retool entry): _build_base_array's
+    # center_key used to be a bijection over game-state + handedness ALONE,
+    # valid only because every non-location feature besides the 3 varying
+    # ones was constant across pitchers for a fixed game-state. That broke
+    # once pitcher-varying physics got folded into the same array for the
+    # candidate-search path (dedup_by_pitcher_season=True) -- two different
+    # pitchers sharing a game-state would silently get deduped together and
+    # one would score with the other's physics. This builds a fixture with
+    # multiple pitchers sharing at least one game-state, gives each pitcher
+    # distinct candidate physics, and confirms the batched path matches an
+    # unbatched per-row reference -- a reverted, game-state-only key would
+    # fail this by borrowing one pitcher's physics for another's row.
+    raw = make_raw_df(n_per_type=300, pitch_types=("FF",), n_pitchers=10)
+    scored = pitching.add_pitching_plus(raw, models_dir=tmp_path, retrain=True)
+
+    in_scope = (
+        scored.loc[:, bestpitch.REQUIRED_COLS + bestpitch.BASE_STATE_COLS + ["stuff_plus"]]
+        .dropna(subset=bestpitch.REQUIRED_COLS + ["stuff_plus"])
+        .copy()
+    )
+    engineered = bestpitch.stuff_mod._build_v1_features(in_scope)
+    engineered = bestpitch._build_features(engineered)
+    engineered[bestpitch.ZONE_COL] = in_scope[bestpitch.ZONE_COL].to_numpy()
+
+    base = engineered[engineered[bestpitch.PITCH_TYPE_COL] == "FF"].head(80).copy()
+
+    game_state_key = _game_state_key(base)
+    shared_counts = pd.Series(game_state_key, index=base.index).value_counts()
+    multi_pitcher_group = None
+    for gk in shared_counts[shared_counts > 1].index:
+        candidate_rows = base[game_state_key == gk]
+        if candidate_rows["pitcher"].nunique() > 1:
+            multi_pitcher_group = candidate_rows
+            break
+    assert multi_pitcher_group is not None, (
+        "fixture needs >1 pitcher sharing a game-state to test the pitcher-season dedup-key fix"
+    )
+
+    # Give each pitcher's rows distinct, deterministic candidate physics
+    # (not the fixture's own real per-pitch values), so a dedup bug that
+    # collapses different pitchers together produces a detectably wrong
+    # prediction rather than a coincidentally-correct one.
+    pitcher_ids = sorted(base["pitcher"].unique())
+    for i, feat in enumerate(bestpitch.STUFF_FEATURES):
+        cand_col = f"cand_{feat}"
+        base[cand_col] = base["pitcher"].map({p: 90.0 + 10 * i + p for p in pitcher_ids})
+
+    models = pitching.load_cached_models(tmp_path)
+    model = models["FF"]
+
+    array, p_throws_is_R, zone_height, center_key = bestpitch._build_base_array(
+        base, physics_cols=bestpitch.STUFF_FEATURE_CAND_COLS, dedup_by_pitcher_season=True,
+    )
+    # The whole point of this test: confirm the key actually discriminates
+    # by pitcher within a shared game-state, not just by game-state.
+    same_state_rows = base.loc[multi_pitcher_group.index]
+    same_state_keys = pd.Series(center_key, index=base.index).loc[same_state_rows.index]
+    assert same_state_keys.nunique() > 1, "center_key must not collapse different pitchers sharing a game-state"
+
+    center_x, center_z = base["plate_x"].mean(), base["plate_z_rel"].mean()
+    batched = bestpitch._batched_target_averaged_pitching_run_value(
+        model, array, p_throws_is_R, zone_height, center_key, center_x, center_z
+    )
+
+    z_offset = bestpitch.TARGET_RADIUS_FT / zone_height
+    points = [
+        (center_x, center_z),
+        (center_x + bestpitch.TARGET_RADIUS_FT, center_z),
+        (center_x - bestpitch.TARGET_RADIUS_FT, center_z),
+        (center_x, center_z + z_offset),
+        (center_x, center_z - z_offset),
+    ]
+    reference = np.mean(
+        [
+            bestpitch._predict_at_point(
+                base, model, bestpitch.STUFF_FEATURE_CAND_COLS, bestpitch.NON_LOCATION_FEATURES, px, pz
+            )
+            for px, pz in points
+        ],
         axis=0,
     )
 
@@ -121,7 +219,7 @@ def test_batched_target_averaging_matches_unbatched_reference_with_varying_zone_
 
 
 def test_actual_smoothed_differs_from_pinpoint_pitch_pitching_plus(
-    make_raw_df, small_stuff_thresholds, small_location_thresholds, tmp_path
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, small_pitching_thresholds, tmp_path
 ):
     # Regression test for the pinpoint-vs-smoothed comparison bug (docs/
     # dev_log.md 8/30 entry): bestPitch+'s comparison must use the SAME
@@ -151,3 +249,26 @@ def test_actual_smoothed_differs_from_pinpoint_pitch_pitching_plus(
     assert not np.allclose(actual_smoothed.to_numpy(), in_scope["pitch_pitching_plus"].to_numpy())
     diffs = (actual_smoothed - in_scope["pitch_pitching_plus"]).abs()
     assert (diffs > 1e-6).mean() > 0.5
+
+
+def test_arsenal_physics_avg_only_uses_reliable_rows(make_raw_df, small_stuff_thresholds, small_pitching_thresholds, tmp_path):
+    from pitching_plus.scripts import stuff
+
+    raw = make_raw_df(n_per_type=300, pitch_types=("FF",), n_pitchers=10)
+    scored = stuff.add_stuff_plus(raw, models_dir=tmp_path, retrain=True)
+    engineered = bestpitch.stuff_mod._build_v1_features(
+        scored.dropna(subset=stuff.REQUIRED_COLS)
+    )
+
+    avg = bestpitch._arsenal_physics_avg(engineered)
+
+    assert set(avg.columns) == {"pitcher", "pitch_type", "game_year"} | set(bestpitch.STUFF_FEATURE_CAND_COLS)
+    # Every (pitcher, pitch_type, season) row in the output must itself be
+    # reliable -- a row built from unreliable (few-pitch) rows would be a
+    # noisy candidate physics estimate feeding the counterfactual search.
+    reliable_keys = set(
+        map(tuple, engineered.loc[engineered["stuff_plus_reliable"].fillna(False), ["pitcher", "pitch_type", "game_year"]].drop_duplicates().to_numpy())
+    )
+    output_keys = set(map(tuple, avg[["pitcher", "pitch_type", "game_year"]].to_numpy()))
+    assert output_keys <= reliable_keys
+    assert len(output_keys) > 0
