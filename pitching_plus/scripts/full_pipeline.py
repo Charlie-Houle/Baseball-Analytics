@@ -47,7 +47,7 @@ def run_pipeline(input_path=DEFAULT_INPUT, output_path=None, models_dir=DEFAULT_
 
     df = pd.read_csv(input_path)
 
-    df = add_stuff_plus(df)
+    df = add_stuff_plus(df, models_dir=models_dir, retrain=retrain)
     df = add_location_plus(df, models_dir=models_dir, retrain=retrain)
     df = add_pitching_plus(df, models_dir=models_dir, retrain=retrain)
     df = add_bestpitch_plus(df, models_dir=models_dir, retrain=retrain)
@@ -64,7 +64,7 @@ if __name__ == "__main__":
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
-    parser.add_argument("--retrain", action="store_true", help="Retrain Location+ models instead of using the cache")
+    parser.add_argument("--retrain", action="store_true", help="Retrain Stuff+/Location+/Pitching+ models instead of using the cache")
     args = parser.parse_args()
 
     run_pipeline(args.input, args.output, models_dir=args.models_dir, retrain=args.retrain)

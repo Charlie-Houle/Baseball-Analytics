@@ -9,7 +9,11 @@ base state, batter/pitcher handedness, everything but pitch type and
 location) and searches every combination of:
   - a candidate pitch type from that pitcher's own RELIABLE arsenal that
     season (stuff_plus_reliable == True), never a pitch type they don't
-    actually throw.
+    actually throw. Since Pitching+ is retooled 9/4/2026 into a joint model
+    trained on physics + location together (docs/dev_log.md), a candidate's
+    "stuff" contribution is now that pitch type's own average physics
+    (STUFF_FEATURES) for this pitcher-season, not a precomputed scalar --
+    see _arsenal_physics_avg.
   - a candidate zone, using Statcast's own `zone` 1-9 (in-strike) plus 11-14
     (chase/waste corners just outside the zone: real "up-and-in chase"
     type locations, not just heart-of-the-zone spots) as purpose.md's "zone,
@@ -22,11 +26,12 @@ TARGET_RADIUS_FT, not a single pinpoint query): purpose.md's "zone, not
 pinpoint" taken literally. No pitcher hits an exact spot, and scoring only the
 single reference point let bestPitch+'s max-over-candidates search exploit
 any local spike in the fitted regression surface, substantially inflating the
-result (see docs/dev_log.md). Combined with that pitcher's own real stuff_plus
-for the candidate pitch type, run through pitching.py's already-fitted blend +
-its pitch-level 100+ calibration (_score_pitching_plus, level="pitch"), the
-exact same scale as the real pitch_pitching_plus, not a separately-derived
-one. The max over all candidates is `best_pitching_plus`.
+result (see docs/dev_log.md). The candidate's fixed physics (that pitch
+type's own arsenal-average STUFF_FEATURES) and varying location together form
+one joint feature row scored directly by pitching.py's own trained model for
+that pitch type, then calibrated to the identical pitch-level 100+ scale as
+real pitches (pitching._calibrate_raw_value). The max over all candidates is
+`best_pitching_plus`.
 
 `best_pitching_plus` is scored with target-averaging (smoothed, area-based);
 the real `pitch_pitching_plus` is a pinpoint value (the pitch's own exact
@@ -61,8 +66,8 @@ dataframe and returns it with:
                              considered (see notebooks/bestpitch.ipynb).
 
 Calls add_stuff_plus/add_location_plus/add_pitching_plus itself if their
-columns aren't already present. Requires a cached Location+ model (via
-location.load_cached_models); run add_location_plus at least once first.
+columns aren't already present. Requires a cached Pitching+ model (via
+pitching.load_cached_models); run add_pitching_plus at least once first.
 """
 
 import time
@@ -72,22 +77,22 @@ import pandas as pd
 
 try:
     from . import pitching as pitching_mod
+    from . import stuff as stuff_mod
     from .location import (
         BASE_STATE_COLS, DEFAULT_MODELS_DIR, LOCATION_FEATURES,
-        REQUIRED_COLS as LOCATION_REQUIRED_COLS, TARGET_COL,
-        _build_features, load_cached_models,
+        _build_features,
     )
-    from .pitching import add_pitching_plus
-    from .stuff import JUNK_PITCH_TYPES, PITCH_TYPE_COL, PITCHER_COL, SEASON_COL
+    from .pitching import JOINT_FEATURES, add_pitching_plus
+    from .stuff import JUNK_PITCH_TYPES, PITCH_TYPE_COL, PITCHER_COL, SEASON_COL, STUFF_FEATURES
 except ImportError:
     import pitching as pitching_mod
+    import stuff as stuff_mod
     from location import (
         BASE_STATE_COLS, DEFAULT_MODELS_DIR, LOCATION_FEATURES,
-        REQUIRED_COLS as LOCATION_REQUIRED_COLS, TARGET_COL,
-        _build_features, load_cached_models,
+        _build_features,
     )
-    from pitching import add_pitching_plus
-    from stuff import JUNK_PITCH_TYPES, PITCH_TYPE_COL, PITCHER_COL, SEASON_COL
+    from pitching import JOINT_FEATURES, add_pitching_plus
+    from stuff import JUNK_PITCH_TYPES, PITCH_TYPE_COL, PITCHER_COL, SEASON_COL, STUFF_FEATURES
 
 # ============================================================
 # CONFIGURATION
@@ -111,37 +116,46 @@ TARGET_RADIUS_FT = (TARGET_DIAMETER_BALLS * BALL_DIAMETER_IN / 2) / 12
 # estimate, not a fixed per-batter constant -- it's a near-continuous float
 # (on the real dataset, 1.73M distinct values out of 3.57M rows), so keying
 # the +z/-z dedup on its raw value collapses almost nothing (unlike
-# center_key, which cleanly collapses to <=1,152 values). Rounding it to the
-# nearest ZONE_HEIGHT_DEDUP_ROUND_FT before using it as a dedup key groups
-# pitches with near-identical strike zones into the same predict() call.
-# Error this introduces: the +z/-z offset is TARGET_RADIUS_FT / zone_height,
-# so d(offset)/d(zone_height) = -TARGET_RADIUS_FT / zone_height^2 -- at a
-# typical zone_height of ~1.8ft, that's about -0.11 ft of offset error per ft
-# of zone_height error, so a 0.02ft (~1/4 inch) rounding step induces at most
-# ~0.002ft (~0.03 inch) of error in the queried plate_z_rel point, on a
-# target radius that's already ~4.35 inches (TARGET_RADIUS_FT) -- roughly
-# 0.5% of the target radius itself, well inside the "not a pinpoint, a small
-# target area" approximation the design already accepts.
+# center_key, which cleanly collapses to a bounded number of values).
+# Rounding it to the nearest ZONE_HEIGHT_DEDUP_ROUND_FT before using it as a
+# dedup key groups pitches with near-identical strike zones into the same
+# predict() call. Error this introduces: the +z/-z offset is
+# TARGET_RADIUS_FT / zone_height, so d(offset)/d(zone_height) =
+# -TARGET_RADIUS_FT / zone_height^2 -- at a typical zone_height of ~1.8ft,
+# that's about -0.11 ft of offset error per ft of zone_height error, so a
+# 0.02ft (~1/4 inch) rounding step induces at most ~0.002ft (~0.03 inch) of
+# error in the queried plate_z_rel point, on a target radius that's already
+# ~4.35 inches (TARGET_RADIUS_FT) -- roughly 0.5% of the target radius
+# itself, well inside the "not a pinpoint, a small target area"
+# approximation the design already accepts.
 ZONE_HEIGHT_DEDUP_ROUND_FT = 0.02
 
-# LOCATION_FEATURES minus the three location-derived columns _predict_at_point
-# overwrites per candidate point; everything else a row already has.
+# LOCATION_FEATURES minus the three location-derived columns that get
+# overwritten per candidate point; everything else a row already has.
 NON_LOCATION_FEATURES = [c for c in LOCATION_FEATURES if c not in ("plate_x", "plate_z_rel", "plate_x_armside")]
 
-# Column positions of the three location-derived features within
-# LOCATION_FEATURES, so the batched search path (_build_base_array /
-# _batched_target_averaged_location_run_value) can overwrite them in a plain
-# numpy array without going through pandas per candidate.
-_LOCATION_COL_INDEX = {col: i for i, col in enumerate(LOCATION_FEATURES)}
-_PLATE_X_IDX = _LOCATION_COL_INDEX["plate_x"]
-_PLATE_Z_REL_IDX = _LOCATION_COL_INDEX["plate_z_rel"]
-_PLATE_X_ARMSIDE_IDX = _LOCATION_COL_INDEX["plate_x_armside"]
+# Column positions of every JOINT_FEATURES entry, so the batched search path
+# (_build_base_array / _batched_target_averaged_pitching_run_value) can
+# overwrite the 3 location-derived columns in a plain numpy array without
+# going through pandas per candidate.
+_JOINT_COL_INDEX = {col: i for i, col in enumerate(JOINT_FEATURES)}
+_PLATE_X_IDX = _JOINT_COL_INDEX["plate_x"]
+_PLATE_Z_REL_IDX = _JOINT_COL_INDEX["plate_z_rel"]
+_PLATE_X_ARMSIDE_IDX = _JOINT_COL_INDEX["plate_x_armside"]
+_STUFF_FEATURE_SET = set(STUFF_FEATURES)
+
+# A candidate pitch type's own arsenal-average physics, distinctly named so
+# they don't collide with a row's own real STUFF_FEATURES columns when both
+# are present on the same working frame (see _arsenal_physics_avg).
+STUFF_FEATURE_CAND_COLS = [f"cand_{f}" for f in STUFF_FEATURES]
 
 # NOTE: BASE_STATE_COLS (on_1b/on_2b/on_3b) is deliberately NOT folded into
 # REQUIRED_COLS. NaN there means "base empty" (a real game state), not
 # missing data, exactly as in location.py. Must be present as columns, but
-# not dropna-gated.
-REQUIRED_COLS = LOCATION_REQUIRED_COLS + [ZONE_COL]
+# not dropna-gated. REQUIRED_COLS now needs pitching.py's own union (stuff's
+# physics columns + location's columns), not just location's, since scoring
+# a counterfactual candidate needs a full joint feature row.
+REQUIRED_COLS = sorted(set(pitching_mod.REQUIRED_COLS) | {ZONE_COL})
 
 
 # ============================================================
@@ -166,106 +180,155 @@ def _zone_reference(engineered):
 
 
 # ============================================================
-# ARSENAL: WHICH PITCH TYPES CAN THIS PITCHER ACTUALLY THROW
+# ARSENAL: WHICH PITCH TYPES CAN THIS PITCHER ACTUALLY THROW,
+# AND WHAT DOES THEIR PHYSICS LOOK LIKE
 # ============================================================
 
-def _arsenal_wide(df):
+def _arsenal_physics_avg(df):
     """
-    One row per (pitcher, season), one column per candidate pitch type
-    (`cand_stuff_<type>`) holding that pitcher's own real stuff_plus for it,
-    NaN wherever that pitch type isn't a reliable part of their arsenal that
-    season (stuff_plus_reliable == True), so it's automatically excluded from
-    the candidate search rather than needing a separate mask.
+    One row per (pitcher, pitch_type, season), with that pitcher's own
+    average STUFF_FEATURES for pitch types that are a reliable part of their
+    arsenal that season (stuff_plus_reliable == True) -- the fixed physics
+    half of a counterfactual joint-feature row. Replaces the old
+    _arsenal_wide (which held a single cand_stuff_<type> scalar): the joint
+    model needs the full physics vector, not a precomputed 100+ score, and
+    this table doubles as the arsenal-membership gate, exactly like
+    cand_stuff_<type> being NaN used to (a pitch type absent from this table
+    for a given pitcher-season is automatically excluded from the search).
+    Requires `df` to already have STUFF_FEATURES engineered
+    (stuff_mod._build_v1_features already run on it) and stuff_plus_reliable
+    attached.
     """
 
-    arsenal = (
-        df[df["stuff_plus_reliable"].fillna(False)]
-        [[PITCHER_COL, PITCH_TYPE_COL, SEASON_COL, "stuff_plus"]]
-        .drop_duplicates()
+    reliable = df[df["stuff_plus_reliable"].fillna(False)]
+    avg = (
+        reliable
+        .groupby([PITCHER_COL, PITCH_TYPE_COL, SEASON_COL], observed=True)[STUFF_FEATURES]
+        .mean()
+        .reset_index()
+        .rename(columns=dict(zip(STUFF_FEATURES, STUFF_FEATURE_CAND_COLS)))
     )
-    wide = arsenal.pivot_table(index=[PITCHER_COL, SEASON_COL], columns=PITCH_TYPE_COL, values="stuff_plus")
-    wide.columns = [f"cand_stuff_{c}" for c in wide.columns]
-    return wide.reset_index()
+    return avg
 
 
 # ============================================================
 # COUNTERFACTUAL SEARCH: BEST (PITCH TYPE, ZONE) PER PITCH
 # ============================================================
 
-def _predict_at_point(base, model, non_location_features, plate_x, plate_z_rel):
+def _predict_at_point(base, model, physics_cols, non_location_features, plate_x, plate_z_rel):
     X = base[non_location_features].copy()
+    for feat, src_col in zip(STUFF_FEATURES, physics_cols):
+        X[feat] = base[src_col]
     X["plate_x"] = plate_x
     X["plate_z_rel"] = plate_z_rel
     # Arm-side sign is keyed on the PITCHER's throwing hand (p_throws), not
     # batter stand -- see location.py's plate_x_armside comment for the
     # derivation. Fixed 9/2 (docs/dev_log.md); was previously keyed on stand.
     X["plate_x_armside"] = np.where(base["p_throws"] == "R", -plate_x, plate_x)
-    return model.predict(X[LOCATION_FEATURES].to_numpy())
+    return model.predict(X[JOINT_FEATURES].to_numpy())
 
 
-def _build_base_array(base):
+def _build_base_array(base, physics_cols, dedup_by_pitcher_season):
     """
     Prebuilds `base`'s non-location features as one numpy array, in
-    LOCATION_FEATURES column order (the 3 location columns start at 0 and get
-    overwritten per candidate point by _batched_target_averaged_location_run_value),
-    plus the per-row quantities every candidate point needs: p_throws == 'R'
-    (arm-side sign is keyed on the PITCHER's throwing hand, not batter
-    stand -- see location.py's plate_x_armside comment), strike-zone height
-    (for converting TARGET_RADIUS_FT to plate_z_rel units), and `center_key`.
+    JOINT_FEATURES column order (the 3 location columns get overwritten per
+    candidate point by _batched_target_averaged_pitching_run_value), plus
+    the per-row quantities every candidate point needs: p_throws == 'R'
+    (arm-side sign), strike-zone height (for converting TARGET_RADIUS_FT to
+    plate_z_rel units), and `center_key`.
 
-    `center_key` identifies rows that are indistinguishable to the location
-    model for any candidate point that doesn't depend on strike-zone height
-    (center, +x, -x -- 3 of the 5 target-averaging points): `re288_state`
-    already bijectively encodes balls/strikes/outs_when_up/on-base state (see
-    location.py's _build_features), so together with stand_R and p_throws_R
-    it fully determines every LOCATION_FEATURES column except the 3 location
-    ones. There are at most 288 * 2 * 2 = 1,152 distinct keys, versus up to
-    millions of rows in `base` -- _batched_target_averaged_location_run_value
-    predicts once per unique key for those 3 points instead of once per row.
-    Note `center_key` itself still needs batter stand (stand_R is a real
-    model feature, independent of the arm-side sign convention), even though
-    the arm-side sign returned separately below does not.
+    `physics_cols` selects which columns to read STUFF_FEATURES values from
+    -- the row's own real STUFF_FEATURES columns when scoring the actual
+    pitch (_actual_smoothed_pitching_plus, physics_cols=STUFF_FEATURES), or
+    a candidate pitch type's cand_<feature> arsenal-average columns when
+    scoring a counterfactual pitch-type candidate
+    (_search_best_pitching_plus, physics_cols=STUFF_FEATURE_CAND_COLS).
+    Either way, physics values are FIXED across every candidate zone for a
+    given row -- only the 3 location columns vary.
+
+    `center_key` identifies rows that are indistinguishable to the model for
+    any candidate point that doesn't depend on strike-zone height (center,
+    +x, -x -- 3 of the 5 target-averaging points). For the location-only
+    model this used to be a genuine bijection over game-state + handedness
+    alone (re288_state * stand_R * p_throws_R, <=1,152 distinct keys),
+    because every non-location LOCATION_FEATURES column besides the 3
+    varying ones is constant across pitchers for a fixed game-state. That
+    stopped being true once physics (which varies by pitcher, and by
+    pitch type/season for the candidate case) got folded into the same
+    array: two rows sharing a game-state but different pitcher-seasons are
+    NOT interchangeable anymore, and deduping them together would silently
+    score one pitcher's candidate with another pitcher's physics -- a real
+    bug found during this retool's planning (docs/dev_log.md).
+
+    `dedup_by_pitcher_season=True` (the candidate-search case) extends the
+    key with a compact (pitcher, season) id, so only rows sharing BOTH a
+    game-state AND a pitcher-season collapse together -- still a real
+    reduction versus the raw row count (many real pitches share both), just
+    a smaller one than the location-only ceiling. `dedup_by_pitcher_season=
+    False` (the actual-pitch case) uses a trivial per-row-unique key instead:
+    physics there is each pitch's own real, continuously-varying
+    measurement, not a per-pitcher-season average, so no two rows are
+    genuinely interchangeable and there is no real dedup benefit to chase --
+    `np.unique` on an already-unique key is a no-op split, not a bug,
+    letting both callers share the identical downstream averaging code.
     """
 
-    array = np.zeros((len(base), len(LOCATION_FEATURES)), dtype=float)
-    for col, idx in _LOCATION_COL_INDEX.items():
-        if col not in ("plate_x", "plate_z_rel", "plate_x_armside"):
+    physics_col_by_feature = dict(zip(STUFF_FEATURES, physics_cols))
+
+    array = np.zeros((len(base), len(JOINT_FEATURES)), dtype=float)
+    for col, idx in _JOINT_COL_INDEX.items():
+        if col in _STUFF_FEATURE_SET:
+            array[:, idx] = base[physics_col_by_feature[col]].to_numpy(dtype=float)
+        elif col not in ("plate_x", "plate_z_rel", "plate_x_armside"):
             array[:, idx] = base[col].to_numpy(dtype=float)
 
-    stand_is_R = (base["stand"] == "R").to_numpy()
     p_throws_is_R = (base["p_throws"] == "R").to_numpy()
     zone_height = (base["sz_top"] - base["sz_bot"]).to_numpy()
-    re288_state = base["re288_state"].to_numpy(dtype=np.int64)
-    p_throws_R = base["p_throws_R"].to_numpy(dtype=np.int64)
-    center_key = (re288_state * 2 + stand_is_R.astype(np.int64)) * 2 + p_throws_R
+
+    if dedup_by_pitcher_season:
+        stand_is_R = (base["stand"] == "R").to_numpy()
+        re288_state = base["re288_state"].to_numpy(dtype=np.int64)
+        p_throws_R = base["p_throws_R"].to_numpy(dtype=np.int64)
+        game_state_key = (re288_state * 2 + stand_is_R.astype(np.int64)) * 2 + p_throws_R
+        composite = (
+            base[PITCHER_COL].astype(str) + "_" + base[SEASON_COL].astype(str)
+            + "_" + pd.Series(game_state_key, index=base.index).astype(str)
+        )
+        center_key, _ = pd.factorize(composite)
+    else:
+        center_key = np.arange(len(base), dtype=np.int64)
 
     return array, p_throws_is_R, zone_height, center_key
 
 
-def _batched_target_averaged_location_run_value(model, array, p_throws_is_R, zone_height, center_key, center_x, center_z_rel):
+def _batched_target_averaged_pitching_run_value(model, array, p_throws_is_R, zone_height, center_key, center_x, center_z_rel):
     """
-    Averages the model's location_run_value prediction over the same 5-point
-    "target" (center + N/S/E/W at TARGET_RADIUS_FT) as _predict_at_point, but
-    deduplicated: rows that would get an identical (or, for +z/-z, a
-    near-identical -- see below) model input for a given point are predicted
-    once, not once each (see _build_base_array's docstring for
-    `center_key`). Every row gets the same value it would from predicting on
-    it directly (center/+x/-x), or a value within a tiny, bounded tolerance
-    of it (+z/-z, see ZONE_HEIGHT_DEDUP_ROUND_FT), computed once and
-    broadcast back via `inverse` instead of recomputed per duplicate row.
+    Averages the model's raw pitching_run_value prediction over the same
+    5-point "target" (center + N/S/E/W at TARGET_RADIUS_FT) as
+    _predict_at_point, but deduplicated: rows that would get an identical
+    (or, for +z/-z, a near-identical -- see below) model input for a given
+    point are predicted once, not once each (see _build_base_array's
+    docstring for `center_key`). Every row gets the same value it would from
+    predicting on it directly (center/+x/-x), or a value within a tiny,
+    bounded tolerance of it (+z/-z, see ZONE_HEIGHT_DEDUP_ROUND_FT),
+    computed once and broadcast back via `inverse` instead of recomputed per
+    duplicate row. No logic here changed when this was extended from a
+    location-only model to the joint model -- `array` simply carries more
+    columns now, and `model.predict()` returns the target's raw joint
+    prediction directly instead of a location-only value needing a separate
+    blend step afterward.
 
     Center/+x/-x (indices 0-2) don't depend on strike-zone height, so they
-    dedupe exactly on `center_key` alone (<=1,152 distinct rows to predict
-    on, regardless of how large `array` is). +z/-z (indices 3-4)
-    additionally depend on each row's own zone_height (a near-continuous
-    per-pitch float -- see ZONE_HEIGHT_DEDUP_ROUND_FT's comment -- raw
-    zone_height alone would barely dedupe at all), so they dedupe on
-    (center_key, zone_height rounded to ZONE_HEIGHT_DEDUP_ROUND_FT) instead.
-    The z-offset itself still uses each dedup group's representative row's
-    exact (unrounded) zone_height, so the rounding only affects which rows
-    share a predict() call, not the offset's own precision. The z-offset is
-    converted from physical feet to plate_z_rel units per row, since strike
-    zone height varies by batter.
+    dedupe exactly on `center_key` alone. +z/-z (indices 3-4) additionally
+    depend on each row's own zone_height (a near-continuous per-pitch float
+    -- see ZONE_HEIGHT_DEDUP_ROUND_FT's comment -- raw zone_height alone
+    would barely dedupe at all), so they dedupe on (center_key, zone_height
+    rounded to ZONE_HEIGHT_DEDUP_ROUND_FT) instead. The z-offset itself
+    still uses each dedup group's representative row's exact (unrounded)
+    zone_height, so the rounding only affects which rows share a predict()
+    call, not the offset's own precision. The z-offset is converted from
+    physical feet to plate_z_rel units per row, since strike zone height
+    varies by batter.
     """
 
     uniq_center, first_center, inverse_center = np.unique(center_key, return_index=True, return_inverse=True)
@@ -310,99 +373,17 @@ def _batched_target_averaged_location_run_value(model, array, p_throws_is_R, zon
     return predictions.mean(axis=0)
 
 
-def _all_zones_target_averaged_location_run_value(model, array, p_throws_is_R, zone_height, center_key, zone_ref):
-    """
-    Same 5-point target-averaged prediction as
-    _batched_target_averaged_location_run_value, but for every candidate zone
-    in `zone_ref` at once instead of one zone per call. Used by
-    _search_best_pitching_plus, which needs every zone's prediction for the
-    same pitch-type population; _actual_smoothed_pitching_plus still uses the
-    per-zone version since its per-zone `base` subset (rows actually thrown
-    in that zone) differs by zone, so there's no shared population to batch
-    across.
-
-    _search_best_pitching_plus's zone loop used to call
-    _batched_target_averaged_location_run_value once per zone (13x per pitch
-    type), even though `array`/`p_throws_is_R`/`zone_height`/`center_key` are
-    identical across all 13 zones for a given pitch type (see
-    _search_best_pitching_plus's own comment on `base`). Each of those 13
-    calls redundantly reran np.unique(center_key) and np.unique(zh_key), and
-    issued its own 2 model.predict() calls -- 26 predict() calls per pitch
-    type, 260 for the full search. This version dedupes once and stacks all
-    13 zones' query points into 2 total predict() calls per pitch type: one
-    for the center/+x/-x set (n_zones * 3 * k rows), one for the +z/-z set
-    (n_zones * 2 * m rows), where k/m are the same <=1,152 / <=unique-zone-
-    height dedup counts as the per-zone version.
-
-    Same output as calling the per-zone version once per zone (verified
-    against it on synthetic data with a stub model, using the same
-    ZONE_HEIGHT_DEDUP_ROUND_FT bucketing on both sides -- max abs diff
-    ~1e-13, floating-point summation-order noise; see that constant's
-    comment for the bounded approximation this introduces relative to a
-    truly unrounded zone_height key). Returns an (n_zones, len(array))
-    array, row order matching zone_ref.index order; row i of the result is
-    what _batched_target_averaged_location_run_value would return for
-    zone_ref.iloc[i].
-    """
-
-    uniq_center, first_center, inverse_center = np.unique(center_key, return_index=True, return_inverse=True)
-    k = uniq_center.shape[0]
-    zone_height_bucket = np.round(zone_height / ZONE_HEIGHT_DEDUP_ROUND_FT)
-    zh_key = np.column_stack([center_key, zone_height_bucket])
-    uniq_zh, first_zh, inverse_zh = np.unique(zh_key, axis=0, return_index=True, return_inverse=True)
-    m = uniq_zh.shape[0]
-
-    n_zones = len(zone_ref)
-    zone_x = zone_ref["plate_x"].to_numpy()
-    zone_z = zone_ref["plate_z_rel"].to_numpy()
-
-    # --- center / +x / -x set: one predict() call for all zones ---
-    center_rows = np.tile(array[first_center], (n_zones * 3, 1))
-    center_p_throws_R = np.tile(p_throws_is_R[first_center], n_zones * 3)
-
-    x_offsets = np.array([0.0, TARGET_RADIUS_FT, -TARGET_RADIUS_FT])
-    center_x_flat = np.repeat(zone_x, 3 * k) + np.tile(np.repeat(x_offsets, k), n_zones)
-    center_z_flat = np.repeat(zone_z, 3 * k)
-
-    center_rows[:, _PLATE_X_IDX] = center_x_flat
-    center_rows[:, _PLATE_Z_REL_IDX] = center_z_flat
-    center_rows[:, _PLATE_X_ARMSIDE_IDX] = np.where(center_p_throws_R, -center_x_flat, center_x_flat)
-
-    center_preds = model.predict(center_rows).reshape(n_zones, 3, k)
-
-    # --- +z / -z set: one predict() call for all zones ---
-    ns_rows = np.tile(array[first_zh], (n_zones * 2, 1))
-    ns_p_throws_R = np.tile(p_throws_is_R[first_zh], n_zones * 2)
-    ns_z_offset = TARGET_RADIUS_FT / zone_height[first_zh]
-
-    ns_x_flat = np.repeat(zone_x, 2 * m)
-    z_signed_offsets = np.concatenate([ns_z_offset, -ns_z_offset])
-    ns_z_flat = np.repeat(zone_z, 2 * m) + np.tile(z_signed_offsets, n_zones)
-
-    ns_rows[:, _PLATE_X_IDX] = ns_x_flat
-    ns_rows[:, _PLATE_Z_REL_IDX] = ns_z_flat
-    ns_rows[:, _PLATE_X_ARMSIDE_IDX] = np.where(ns_p_throws_R, -ns_x_flat, ns_x_flat)
-
-    ns_preds = model.predict(ns_rows).reshape(n_zones, 2, m)
-
-    n_rows = array.shape[0]
-    result = np.empty((n_zones, n_rows), dtype=float)
-    for zi in range(n_zones):
-        c = center_preds[zi][:, inverse_center]
-        n = ns_preds[zi][:, inverse_zh]
-        result[zi] = np.concatenate([c, n], axis=0).mean(axis=0)
-    return result
-
-
-def _actual_smoothed_pitching_plus(engineered, models, zone_ref, blend_params, pitch_calibration, verbose=False):
+def _actual_smoothed_pitching_plus(engineered, models, zone_ref, pitch_calibration, verbose=False):
     """
     Scores each pitch's own (actual pitch type, actual zone) combination
     through the identical target-averaging machinery as the candidate
     search, so bestPitch+'s comparison is smoothed-vs-smoothed, not
-    smoothed-vs-pinpoint (see module docstring). Pitches whose own zone
-    isn't one of CANDIDATE_ZONE_CODES, or whose own pitch type has no
-    trained model, get NaN (excluded from bestPitch+ entirely, same as any
-    other out-of-scope pitch).
+    smoothed-vs-pinpoint (see module docstring). Uses the row's own real
+    STUFF_FEATURES (physics_cols=STUFF_FEATURES, dedup_by_pitcher_season=
+    False -- see _build_base_array's docstring for why no dedup benefit
+    exists here). Pitches whose own zone isn't one of CANDIDATE_ZONE_CODES,
+    or whose own pitch type has no trained model, get NaN (excluded from
+    bestPitch+ entirely, same as any other out-of-scope pitch).
 
     With verbose=True, prints one progress line per pitch type (coverage is
     checked per-ptype here rather than per-zone since each pitch type only
@@ -422,15 +403,16 @@ def _actual_smoothed_pitching_plus(engineered, models, zone_ref, blend_params, p
         for zone in base[ZONE_COL].unique():
             zone_rows = base[base[ZONE_COL] == zone]
             ref_row = zone_ref.loc[zone]
-            zone_array, zone_p_throws_is_R, zone_height, zone_center_key = _build_base_array(zone_rows)
-            location_run_value_hyp = _batched_target_averaged_location_run_value(
+            zone_array, zone_p_throws_is_R, zone_height, zone_center_key = _build_base_array(
+                zone_rows, physics_cols=STUFF_FEATURES, dedup_by_pitcher_season=False,
+            )
+            raw_pitching_value_hyp = _batched_target_averaged_pitching_run_value(
                 model, zone_array, zone_p_throws_is_R, zone_height, zone_center_key,
                 ref_row["plate_x"], ref_row["plate_z_rel"],
             )
-            score = pitching_mod._score_pitching_plus(
-                zone_rows["stuff_plus"].to_numpy(), location_run_value_hyp,
-                np.full(len(zone_rows), ptype), zone_rows[SEASON_COL].to_numpy(),
-                blend_params, pitch_calibration, level="pitch",
+            score = pitching_mod._calibrate_raw_value(
+                raw_pitching_value_hyp, np.full(len(zone_rows), ptype), zone_rows[SEASON_COL].to_numpy(),
+                pitch_calibration,
             )
             result.loc[zone_rows.index] = score
 
@@ -445,22 +427,36 @@ def _actual_smoothed_pitching_plus(engineered, models, zone_ref, blend_params, p
     return result
 
 
-def _search_best_pitching_plus(engineered, models, zone_ref, blend_params, pitch_calibration, verbose=False):
+def _search_best_pitching_plus(engineered, arsenal_physics, models, zone_ref, pitch_calibration, verbose=False):
     """
     For every (candidate pitch type with a trained model, candidate zone)
     pair, scores the whole in-scope population at once (vectorized model
     .predict(), averaged over each zone's target area), restricted to rows
-    where that pitch type is actually in the row's own pitcher-season
-    arsenal. Returns the running max across all candidates,
-    `best_pitching_plus`, aligned to engineered's index. Uses `pitch_calibration`
-    (not `calibration`) since every candidate here is a single-pitch score,
-    same as the real pitch_pitching_plus it's compared against.
+    whose pitcher-season has that pitch type as a reliable arsenal member
+    (via an inner join against `arsenal_physics`, which also supplies that
+    pitch type's fixed candidate physics -- see _arsenal_physics_avg).
+    Returns the running max across all candidates, `best_pitching_plus`,
+    aligned to engineered's index. Uses `pitch_calibration` since every
+    candidate here is a single-pitch score, same as the real
+    pitch_pitching_plus it's compared against.
 
-    The location prediction for all 13 zones of a given pitch type is
-    computed together via _all_zones_target_averaged_location_run_value (2
-    model.predict() calls per pitch type instead of 2 per zone); the
-    per-zone loop below only does the cheap part (blend + calibration merge,
-    running max).
+    Scores one zone at a time via _batched_target_averaged_pitching_run_value
+    (base_array/p_throws_is_R/zone_height/center_key are built once per pitch
+    type, outside this loop, since they don't vary by zone -- only the
+    predict() call itself repeats per zone). An earlier version batched every
+    candidate zone into a single predict() call per pitch type
+    (n_zones * 3 and n_zones * 2 rows for the two point sets), which was safe
+    under the pre-9/4 location-only key (<=1,152 dedup groups regardless of
+    population size). It is NOT safe now that `center_key` also discriminates
+    by pitcher-season (see _build_base_array's docstring): a pitch type
+    thrown selectively by many pitchers (e.g. a show-me curveball used in a
+    narrow set of counts per pitcher) barely dedupes at all, so the batched
+    version's n_zones multiplier turned a merely-large per-zone predict()
+    call into a tens-of-millions-of-rows one -- measured directly on the full
+    2021-2025 dataset: one pitch type's build step alone ran for over 3
+    hours and consumed 15+ GB of RAM before being killed, versus a few
+    minutes for the per-zone version below. See docs/dev_log.md's Pitching+
+    migration entry.
 
     With verbose=True, prints one progress line per (pitch type, zone)
     candidate: which candidate just finished out of the total, what fraction
@@ -476,37 +472,44 @@ def _search_best_pitching_plus(engineered, models, zone_ref, blend_params, pitch
     candidate_num = 0
     start = time.time()
 
+    # Carry the original row identity through the per-pitch-type inner join
+    # below (a plain .merge() resets the index) -- built once here, not per
+    # pitch type.
+    engineered = engineered.copy()
+    engineered["_orig_idx"] = engineered.index
+
     for ptype, model in models.items():
-        cand_col = f"cand_stuff_{ptype}"
-        if cand_col not in engineered.columns:
+        ptype_arsenal = arsenal_physics.loc[
+            arsenal_physics[PITCH_TYPE_COL] == ptype, [PITCHER_COL, SEASON_COL] + STUFF_FEATURE_CAND_COLS
+        ]
+        if ptype_arsenal.empty:
             candidate_num += len(zone_ref)
             continue
-        valid = engineered[cand_col].notna()
-        if not valid.any():
+
+        base = engineered.merge(ptype_arsenal, on=[PITCHER_COL, SEASON_COL], how="inner")
+        if base.empty:
             candidate_num += len(zone_ref)
             continue
-        base = engineered.loc[valid]
-        # base, and everything derived from it below, is identical across all
-        # 13 zones for this pitch type -- build it once here rather than
-        # inside the zone loop (see _build_base_array's docstring).
-        base_array, p_throws_is_R, zone_height, center_key = _build_base_array(base)
-        cand_stuff = base[cand_col].to_numpy()
+        base = base.set_index("_orig_idx")
+        base.index.name = None
+
+        # base, and everything derived from it below, is identical across
+        # every candidate zone for this pitch type -- build it once here
+        # rather than inside the zone loop (see _build_base_array's
+        # docstring).
+        base_array, p_throws_is_R, zone_height, center_key = _build_base_array(
+            base, physics_cols=STUFF_FEATURE_CAND_COLS, dedup_by_pitcher_season=True,
+        )
         pitch_types = np.full(len(base), ptype)
         seasons = base[SEASON_COL].to_numpy()
 
-        # All 13 zones' location predictions in 2 model.predict() calls total
-        # (not 2 per zone -- see _all_zones_target_averaged_location_run_value's
-        # docstring), since base_array/p_throws_is_R/zone_height/center_key
-        # don't vary by zone either.
-        location_run_value_hyp_all = _all_zones_target_averaged_location_run_value(
-            model, base_array, p_throws_is_R, zone_height, center_key, zone_ref
-        )
-
-        for zi, (zone, ref_row) in enumerate(zone_ref.iterrows()):
-            location_run_value_hyp = location_run_value_hyp_all[zi]
-            pitching_plus_hyp = pitching_mod._score_pitching_plus(
-                cand_stuff, location_run_value_hyp, pitch_types, seasons,
-                blend_params, pitch_calibration, level="pitch",
+        for zone, ref_row in zone_ref.iterrows():
+            raw_pitching_value_hyp = _batched_target_averaged_pitching_run_value(
+                model, base_array, p_throws_is_R, zone_height, center_key,
+                ref_row["plate_x"], ref_row["plate_z_rel"],
+            )
+            pitching_plus_hyp = pitching_mod._calibrate_raw_value(
+                raw_pitching_value_hyp, pitch_types, seasons, pitch_calibration,
             )
             best.loc[base.index] = np.fmax(best.loc[base.index].to_numpy(), pitching_plus_hyp)
 
@@ -546,10 +549,10 @@ def add_bestpitch_plus(raw_df, models_dir=DEFAULT_MODELS_DIR, retrain=False, ver
     if "pitch_pitching_plus" not in raw_df.columns:
         raw_df = add_pitching_plus(raw_df, models_dir=models_dir, retrain=retrain)
 
-    models = load_cached_models(models_dir)
+    models = pitching_mod.load_cached_models(models_dir)
 
-    fit_scope = raw_df.dropna(subset=["pitch_stuff_plus", "stuff_plus", "location_run_value", TARGET_COL])
-    blend_params, _, pitch_calibration, _ = pitching_mod._fit_pitching_plus_model(fit_scope)
+    fit_scope = raw_df.dropna(subset=["pitching_run_value"])
+    _, _, pitch_calibration = pitching_mod._calibrate(fit_scope)
 
     in_scope = (
         raw_df.loc[
@@ -559,13 +562,16 @@ def add_bestpitch_plus(raw_df, models_dir=DEFAULT_MODELS_DIR, retrain=False, ver
         .dropna(subset=REQUIRED_COLS + ["stuff_plus"])
         .copy()
     )
-    engineered = _build_features(in_scope)
+    # Joint-model scoring needs the full physics + location feature set
+    # engineered directly, same as pitching.py's own add_pitching_plus, not
+    # just the location columns the old location-only search needed.
+    engineered = stuff_mod._build_v1_features(in_scope)
+    engineered = _build_features(engineered)
     engineered[ZONE_COL] = in_scope[ZONE_COL]
     engineered["stuff_plus"] = in_scope["stuff_plus"]
+    engineered["stuff_plus_reliable"] = in_scope["stuff_plus_reliable"]
 
-    arsenal = _arsenal_wide(raw_df)
-    engineered = engineered.merge(arsenal, on=[PITCHER_COL, SEASON_COL], how="left")
-    engineered.index = in_scope.index
+    arsenal_physics = _arsenal_physics_avg(engineered)
 
     zone_ref = _zone_reference(engineered)
     if verbose:
@@ -576,12 +582,12 @@ def add_bestpitch_plus(raw_df, models_dir=DEFAULT_MODELS_DIR, retrain=False, ver
         )
         print("bestPitch+: counterfactual search (best_pitching_plus) ...")
     best_pitching_plus = _search_best_pitching_plus(
-        engineered, models, zone_ref, blend_params, pitch_calibration, verbose=verbose
+        engineered, arsenal_physics, models, zone_ref, pitch_calibration, verbose=verbose
     )
     if verbose:
         print("bestPitch+: scoring actual (pitch type, zone) combinations for comparison ...")
     actual_smoothed = _actual_smoothed_pitching_plus(
-        engineered, models, zone_ref, blend_params, pitch_calibration, verbose=verbose
+        engineered, models, zone_ref, pitch_calibration, verbose=verbose
     )
 
     result = raw_df.copy()
@@ -630,7 +636,7 @@ if __name__ == "__main__":
     parser.add_argument("--input", type=Path, default=default_input)
     parser.add_argument("--output", type=Path, default=default_output)
     parser.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
-    parser.add_argument("--retrain", action="store_true", help="Retrain Location+ models instead of using the cache")
+    parser.add_argument("--retrain", action="store_true", help="Retrain Stuff+/Location+/Pitching+ models instead of using the cache")
     parser.add_argument("--verbose", action="store_true", help="Print counterfactual-search progress")
     args = parser.parse_args()
 
