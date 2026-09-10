@@ -160,3 +160,78 @@
   for resulting, pie domains ordered top-to-bottom matching the count-progression rows, same
   as the deleted HTML version. Cannot visually screenshot a rendered Plotly widget in this
   session either, same caveat as the HTML version before it.
+
+# 9/8/2026: notebooks/fastball_location.ipynb, purpose.md's workflow item 4 (fastball cut, out of order)
+- Built `fastball_location.ipynb`, testing whether pitchers locate fastballs (FF/SI/FC --
+  Baseball Savant's public "Fastball" umbrella) more aggressively in counts that favor them
+  and more centrally in counts that favor the hitter. This is purpose.md's item 4, done
+  ahead of item 3 (pitch-type-mix Plinko, still not started) at the user's request --
+  answering "does location shift with count" doesn't need the pitch-type-mix analysis to
+  exist first, only a later "how much of this is pitch-type mix vs. location" refinement
+  would. Recorded here as a deliberate reordering, not an oversight.
+- Reused rather than reimplemented: `pitching_plus/scripts/location.py`'s `_build_features`
+  (zone-relative `plate_z_rel`, handedness-normalized `plate_x_armside`, `re288_state`),
+  `add_location_plus`, and `load_cached_models`; `bestpitch.py`'s `CANDIDATE_ZONE_CODES`
+  convention (zone 5 = heart, 2/4/6/8 = edge, 1/3/7/9 = corner, 11-14/other = chase) and its
+  `_predict_at_point` held-situation-fixed scoring pattern; `count_state.ipynb`'s
+  `classify_result`, `AB_KEY`, and resulting-vs-immediate distinction.
+- Count-leverage ranking (Stage 0): during planning, the user flagged that 2-1's leverage
+  isn't obvious from a naive ball/strike read (2-2's strikeout rate is much higher than
+  3-1's, despite both being one pitch from 2-1), so bucket boundaries needed to come from
+  data, not an assumed label. First attempt: sum each pitch's actual
+  `delta_pitcher_run_exp` forward from a count's first-arrival pitch to the end of the
+  at-bat (a per-count run-expectancy table, telescoping to `RE(end of AB) - RE(just before
+  this count)` by construction). Mathematically sound but produced a result that inverts
+  known sabermetric literature -- 3-0 ranked as the single MOST pitcher-favorable count,
+  ahead of 0-2. Root cause, confirmed by decomposing the 3-0 population: RE288 deltas scale
+  up with count depth (a resolved full-count strikeout/out swings run expectancy far more
+  than an equivalent early-count one), so the ~42% of 3-0 arrivals that get resolved by a
+  ball in play or a deep-count strikeout contribute large positive outliers that outweigh
+  the more numerous, but individually smaller-magnitude, walks in a straight mean (median
+  was correctly negative at -0.103; only the mean was inverted). Real effect, not a bug, but
+  too counterintuitive to use as the basis for hexbin bucket boundaries here.
+- Replaced with a much simpler, already-validated metric: resulting BB% minus resulting K%
+  per count (pure reuse of `count_state.ipynb`'s own `classify_result`/dedup logic, just a
+  different aggregation of numbers already proven correct there -- cross-checked
+  `n_abs_through` at 0-0 (912,449) and 0-1 (459,559) against count_state.ipynb's own
+  numbers as an in-notebook assert). This ranking matches the standard sabermetric count-
+  value ordering closely (3-0 most hitter-favorable, 0-2 most pitcher-favorable). 2-1 lands
+  at rank 8 of 12 -- essentially tied with 1-0 (-3.16% vs -3.36%) right on the boundary
+  between the "Even" and "Hitter-ahead" terciles, confirming it's a pivot rather than a
+  clean "even" count.
+- Buckets (equal terciles by leverage rank, 4 counts each): Pitcher-ahead = 0-2/1-2/0-1/2-2,
+  Even = 1-1/0-0/1-0/2-1, Hitter-ahead = 3-2/2-0/3-1/3-0.
+- Stage A (hexbin density): matplotlib, not Plotly, for this one chart specifically --
+  true hexagonal binning is a matplotlib feature Plotly has no native equivalent for (same
+  reasoning `count_state.ipynb`'s original bar chart used matplotlib). Paired with a numeric
+  dispersion table (mean |plate_x_armside|, mean distance from mid-zone height, % within a
+  +/-0.83ft heart-width band) per bucket, since a chart's shape isn't something to assert on
+  without seeing it rendered. Pitcher-ahead fastballs are the most spread out on both axes
+  (0.66ft mean |x|, 0.44 mean z-distance, 68.3% in the heart-width band); hitter-ahead are
+  the tightest cluster (0.57ft, 0.35, 75.2%).
+- Stage B (zone-code %): reusing `bestpitch.py`'s zone grouping directly. Found a real
+  nuance on the "getting cute vs. just get it over" framing: Heart% and Corner% both roughly
+  *double* from pitcher-ahead to hitter-ahead counts (5.2%/15.8% at 0-2 vs. 10.6%/21.4% at
+  3-0) -- pitchers aren't specifically aiming for dead-center over corners under pressure.
+  The real swing is Chase/Ball% collapsing (60.5% at 0-2 down to 37.4% at 3-0): two-strike
+  counts are where pitchers can afford to leave the zone; hitter's counts are where they
+  compress toward anywhere in-or-near it, heart or corner alike.
+- Stage C ("meatball gap"): for every real fastball, score a counterfactual dead-center
+  pitch (`plate_x_armside=0, plate_z_rel=0.5`) through the same cached per-pitch-type model,
+  same count/situation held fixed (same pattern as `bestpitch.py`'s `_predict_at_point`,
+  adapted to one fixed reference point instead of a full candidate search -- avoids that
+  module's documented multi-hour cost at full scale). Gap = actual `location_run_value` -
+  meatball prediction. Positive in 0-2 (+0.029) and 1-2 (+0.024): real locations beat a
+  hypothetical grooved pitch there. Increasingly negative toward 3-1 (-0.060) and 3-0
+  (-0.061): real execution falls short of even a dead-center pitch's expected value once a
+  walk becomes costly enough that center-cut itself scores well in the model.
+- 2-1 fork: split at-bats reaching 2-1 by whether the next pitch goes to 3-1 or 2-2 (the
+  only two live continuations; balls/strikes can't revisit 2-1 within an at-bat). Sharp
+  reversal: the 3-1 branch resolves 44.7% walk / 14.0% strikeout; the 2-2 branch resolves
+  38.3% strikeout / 13.3% walk. Concrete confirmation of the Stage 0 boundary placement.
+- Ran end-to-end via `jupyter nbconvert --execute --inplace` on the real 2021-2025 data
+  (3,565,743 pitches; Location+ scoring reused the existing `pitching_plus/models/` cache,
+  no retrain needed), confirmed zero error outputs across all cells, then read back every
+  cell's actual output before writing the two data-dependent discussion markdown cells
+  (Stage A dispersion, 2-1 fork) so their numbers are the real executed values, not
+  estimates written ahead of the run.
