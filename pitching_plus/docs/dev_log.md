@@ -1110,8 +1110,7 @@
   (`HistGradientBoostingRegressor` on `STUFF_FEATURES + LOCATION_FEATURES`
   against `delta_pitcher_run_exp`, mirroring `stuff.py`'s own architecture),
   replacing the WLS blend and its `_apply_blend`/`_fit_pitching_plus_model`
-  internals. See the plan at the time of this entry (working from
-  `C:\\Users\\choul\\.claude\\plans\\tidy-wibbling-nygaard.md`) for the full
+  internals. See the migration plan drafted for this entry for the full
   design, including a real correctness risk identified during planning:
   `bestpitch.py`'s `_build_base_array` zone-dedup key is currently a bijection
   over game-state + handedness only, which stops being true once
