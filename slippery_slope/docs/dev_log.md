@@ -235,3 +235,266 @@
   cell's actual output before writing the two data-dependent discussion markdown cells
   (Stage A dispersion, 2-1 fork) so their numbers are the real executed values, not
   estimates written ahead of the run.
+
+# 9/22/2026: scripts/app.py -- an interactive version of fastball_location.ipynb
+
+- User asked for a way to toggle pitch type and filter to one pitcher on top of
+  `fastball_location.ipynb`'s fastball-only, leaguewide charts, framed as the app idea
+  from the portfolio review. Also asked for the app to load its own sample via pybaseball
+  rather than pushing `data/MLB_2021-2025.csv` into the repo, since a small live pull is
+  faster for anyone trying the app for the first time and the data's already public.
+- Scope cut before writing anything: only Stage A (location by count-leverage bucket) and
+  Stage B (zone-code share by count) carry over. Stage C (the Location+ "meatball gap")
+  needs `pitching_plus`'s cached models, which need a full run over the 3.5M-row dataset to
+  build first -- too heavy a dependency for something meant to load in a couple of minutes.
+  Not built; purpose.md's Tooling section names it as deferred rather than leaving it
+  unmentioned.
+- Four new modules under `scripts/`, mirroring `pitching_plus/scripts`'s one-module-one-job
+  convention rather than one large app file:
+    - `count_leverage.py`: the (balls, strikes) -> Pitcher-ahead/Even/Hitter-ahead mapping
+      and the Heart/Edge/Corner/Chase-Ball zone grouping. Both are fixed lookups ported
+      from `fastball_location.ipynb`'s Stage 0/B results (full 2021-2025 data), not
+      recomputed from whatever the app happens to load -- a week's live sample is a few
+      thousand pitches, nowhere near enough to re-rank the near-tied counts (1-0 and 2-1
+      differ by 0.002 in bb_minus_k) without the bucket assignment flipping week to week.
+    - `sample_data.py`: `load_sample(start_date, end_date)`, a thin wrapper on
+      `pybaseball.statcast()` trimmed to the columns the app needs and sorted the same way
+      this repo's other raw-data loads are. `pybaseball.cache.enable()` at import so a
+      second run of the same date range skips the network entirely.
+    - `location_view.py`: the actual data engineering and figure-building
+      (`engineer_pitches`, `location_figure`, `zone_share_figure`), reusing
+      `pitching_plus/scripts/location.py`'s `_build_features` for the zone-relative,
+      arm-side-adjusted coordinates instead of re-deriving them. No Streamlit import here,
+      so it's unit-testable without a running app and app.py stays UI-only.
+    - `app.py`: the Streamlit page itself -- sidebar date range and pitch-type/pitcher
+      filters, `st.cache_data` around the sample load so changing a filter doesn't re-fetch,
+      then the two figures from `location_view.py`. Cross-project import of
+      `pitching_plus/scripts/location.py` uses the same `sys.path.insert` pattern the
+      notebooks already use, since `streamlit run` executes this file directly rather than
+      as part of a package.
+    - `location_view.py`/`app.py` both try a package-relative import first
+      (`pitching_plus.scripts.location`, `.count_leverage`) and fall back to a bare one,
+      matching `location.py`'s own dual-import convention -- the first branch resolves
+      under pytest (repo root on sys.path via `slippery_slope/__init__.py`, added this
+      session to mirror `pitching_plus`'s package layout), the second under `streamlit run`.
+- Added `slippery_slope/__init__.py`, `scripts/__init__.py`, and `tests/__init__.py` --
+  this project had docs/ and notebooks/ only until now, even though the 9/2 entry described
+  scaffolding all four subfolders when the project was created. First real content in
+  scripts/ and tests/.
+- 13 new tests (`test_count_leverage.py`, `test_sample_data.py`, `test_location_view.py`):
+  the count/zone lookups, `load_sample`'s column-trim/sort/error paths (pybaseball's
+  `statcast` monkeypatched, no real network call in the suite), and `engineer_pitches`
+  plus both figure builders against a small synthetic sample. `pitching_plus/tests` (36
+  tests) reconfirmed green in the same environment afterward -- run once against a
+  mismatched, unpinned global Python install first (10 failures, all environment noise:
+  wrong pandas/numpy/scikit-learn versions), then again against `.venv`'s pinned versions,
+  where all 36 pass. Worth a note here since it looked like a real regression at first.
+- Real-data checks, not just synthetic ones: `load_sample` against the actual default
+  range (2025-06-02 to 2025-06-08) returned 27,228 pitches, 421 pitchers, 94 games in about
+  20 seconds. `engineer_pitches` kept 27,004 of those; the fastball subset (FF/SI/FC) was
+  14,812 pitches across 417 pitchers. Spot-checked the pitcher filter on the single busiest
+  fastball arm in that window (Drew Rasmussen, 143 pitches: 75 Even/52 Pitcher-ahead/16
+  Hitter-ahead) -- enough per bucket for the hexbin to show something, not just noise.
+  Ran the full app through `streamlit.testing.v1.AppTest` (executes the real script, not a
+  browser simulation) against this same live sample, including simulated pitch-type and
+  pitcher-filter interactions: zero exceptions in every case. Caught one real issue this
+  way -- `st.plotly_chart`'s `use_container_width` argument is deprecated as of this
+  streamlit version and slated for removal; switched to `width="stretch"` before it became
+  a problem.
+- Added `streamlit==1.64.0` to requirements.txt (pinned, matching every other dependency
+  here) and a Setup/Slippery-Slope note in README.md on how to run the app.
+
+# 9/22/2026 (cont'd): comparison modes, season-expanded pitcher samples, better titling
+
+User feedback on the first version, in order: a bulk Fastball/Breaking/Offspeed selector
+instead of hand-picking pitch types one at a time; a bigger sample-size option, since the
+default week was thin; a per-pitch-type comparison row instead of only pooling selected
+types together; a pitcher-vs-league-or-pitcher comparison instead of a plain single-pitcher
+filter; clearer axis/chart titling; and, once a pitcher is selected, coarser charts plus a
+bigger sample for that pitcher specifically, with an option to narrow to their own arsenal.
+Landed as one combined pass rather than five separate ones, since the later asks changed
+how the earlier ones needed to be built (see below).
+
+- `pitch_groups.py` (new): `PITCH_TYPE_CATEGORY`, Baseball Savant's own Fastball/Breaking/
+  Offspeed grouping, same fixed-lookup reasoning as `count_leverage.py`'s bucket map --
+  these are established pitch-classification groups, not something to infer from a sample.
+  Wired into a "Bulk select by category" multiselect in app.py whose `on_change` callback
+  overwrites the pitch-type multiselect's `session_state` value; the two stay linked one
+  direction only (category -> types), so a manual edit to the pitch-type list afterward
+  doesn't get overwritten until the category selector is touched again.
+- Sample-size presets: a "Sample window" selectbox (1 day / 1 week / ~100K pitches / custom)
+  replacing the old two bare date pickers, computing the actual start date from the end date
+  and a day-count. The ~100K option's day-count (26) was derived from the measured rate in
+  the last entry (27,228 pitches / 7 days = ~3,890/day) and confirmed live: the 26-day range
+  returned 101,217 pitches. Labels are explicit that these are ballpark, not guaranteed,
+  since the real count depends on how many games are actually on the slate.
+- Pitch-type comparison: `location_view.build_comparison_rows` splits the selected pitch
+  types into either one pooled row or one row per type (a "Compare pitch types side by
+  side" checkbox, shown only once 2+ types are selected), and `location_figure` was
+  rewritten to take a list of rows instead of one dataframe, rendering an N-row x 3-bucket
+  grid. Verified live: FF+SL together came back as 6 axes (2 rows x 3 buckets).
+- Pitcher-vs-pitcher comparison: `build_comparison_rows` no longer filters an engineered
+  frame by player name internally -- it now takes `background_source`/`overlay_source` as
+  two already-engineered frames the caller resolves, so the background can be the league
+  window, a comparison pitcher's own data, or (see below) a season pull, without the
+  function needing to know which. app.py adds a "Compare against: League average / Another
+  pitcher" radio once a pitcher is selected, plus a "Comparison pitcher" selectbox; the
+  overlay checkbox from the last entry is unchanged in behavior, just resolved against
+  whichever background was picked instead of always the league.
+- Season-expanded pitcher samples: `sample_data.load_pitcher_season(pitcher_id, season)`
+  wraps `pybaseball.statcast_pitcher()`, which filters to one pitcher server-side rather
+  than pulling the whole league and filtering locally -- confirmed live, a full 2025 season
+  for one pitcher (3,443 pitches) loaded in 7.1s, versus load_sample's per-day cost for the
+  whole league. Whenever a specific pitcher is selected, app.py fetches this once (cached
+  by pitcher_id+season) and uses it for that pitcher's overlay, their zone-share chart, and
+  their own pitch-type list -- the small league window stays the background/comparison
+  source unless the user explicitly picks another pitcher to compare against (who then also
+  gets their own season pull). `sample_data.py`'s `_trim_and_sort` helper was pulled out of
+  `load_sample` so both loaders share the same column-trim/sort/validation logic instead of
+  duplicating it.
+- Adaptive hexbin granularity: fixed `gridsize=25` looked like real density over a league
+  background (thousands of points per bucket) and like meaningless speckle over a single
+  pitcher's own pitches (tens to a couple hundred per bucket, even across a full season).
+  `location_view._hexbin_gridsize(n)` scales `gridsize` with `sqrt(n)`, floored at 6 and
+  capped at 25, so a hexagon covers roughly the same number of points either way.
+- "Limit to `{pitcher}`'s own pitch types" button: on click, sets the pitch-type
+  multiselect to that pitcher's actual thrown types (from their season pull, so it's their
+  real arsenal, not just whatever the small league window happened to catch). Needed the
+  pitcher selectbox to stop depending on the currently selected pitch types (it's now built
+  from every pitcher in the whole loaded sample, not just those throwing the current
+  selection) -- otherwise picking a pitcher to find their own arsenal would have required
+  already having picked pitch types they throw, a circular requirement. The pitch-type
+  multiselect's own option list is now the union of the small window's types and the
+  focused pitcher's season types, so a type their season shows but the window missed is
+  still selectable.
+- Better titling and explanations: `zone_share_figure`'s x-axis now says "Count
+  (balls-strikes), sorted pitcher-ahead to hitter-ahead -- not alphabetical" instead of
+  leaving the ordering unexplained, and its title changed from "Zone-code share by count"
+  to "Where in the zone pitches go, by count." The location hexbin's axis labels spell out
+  what they mean (arm-side sign convention, zone-relative height) instead of using the raw
+  column names. Added a "What am I looking at?" expander to the app itself covering the
+  count-leverage buckets (built from `count_leverage.counts_by_bucket()`, a new function
+  that lists each bucket's counts from `COUNT_BUCKET` directly rather than a separately
+  hand-typed string, so the two can't drift apart), the zone groups, the location axes, the
+  comparison-mode background/overlay convention, and the season-expansion behavior.
+- 8 new tests (`test_pitch_groups.py`, `counts_by_bucket` coverage in
+  `test_count_leverage.py`, `build_comparison_rows`/`location_figure`/`_hexbin_gridsize`
+  coverage and `load_pitcher_season` coverage in the existing test files) -- 27 total, all
+  passing.
+- Verified live end-to-end via `streamlit.testing.v1.AppTest`, not just unit tests: category
+  bulk-select actually repopulating the pitch-type list, the pitcher selectbox and its
+  season-pull spinner, the "limit to own types" button, switching to "Another pitcher," and
+  the ~100K sample window, all with zero exceptions. Built the full combined case directly
+  (not through AppTest) to inspect the actual figure: Drew Rasmussen's complete arsenal
+  (CH/CU/FC/FF/SI/SL/ST) as 7 comparison rows, background = Paul Skenes's season, overlay =
+  Rasmussen's season. The comparison surfaced something concrete on the first try: Skenes
+  threw zero cutters in pitcher-ahead counts all season (n=0 in that panel) against
+  Rasmussen's 295 -- a sign the feature does what it's for, not just that it runs without
+  error.
+
+# 9/22/2026 (cont'd): overlay opacity slider
+
+User feedback: the overlay points (open circles, no fill, just a colored edge) read as too
+heavy once there's more than a handful of them layered over the hexbin. `location_figure`
+takes a new `overlay_alpha` argument (default 1.0, unchanged for any other caller) applied
+to the overlay scatter's `alpha`; app.py adds a slider (0.1-1.0, default 0.6) next to the
+overlay checkbox, only shown when the overlay is actually on. Verified the slider actually
+changes the rendered collection's alpha via a new location_figure test, and end-to-end via
+`streamlit.testing.v1.AppTest` against live data (select a pitcher, move the slider, zero
+exceptions). 28 tests passing.
+
+# 9/22/2026 (cont'd): dashed comparison lines on the zone-share chart
+
+Zone-share chart previously only ever showed one side (the focused pitcher's own zone mix,
+or the league's if none was selected) -- the comparison feature added earlier only reached
+the location hexbin. User asked for the comparison group's lines to show up there too: same
+color per zone group, dashed, with an on/off toggle.
+
+- `location_view.zone_share_figure` takes new `comparison`/`comparison_label` arguments. The
+  comparison group's own zone-share-by-count is computed with the same logic as the main
+  series (pulled out into `_zone_share_by_count` so it isn't duplicated), then drawn as a
+  dashed line in that category's existing color rather than a second color scale -- four
+  colors already carry the zone-group meaning, so "who" needed a different visual channel,
+  not a fifth-through-eighth color. Two legend-only key traces (`x=[None]`, plain black,
+  solid vs. dashed) name which side is which, since the real dashed traces themselves are
+  `showlegend=False` to avoid doubling the four-item legend into eight near-duplicate
+  entries. Skips the comparison entirely (no dashed traces, no key) when it's empty rather
+  than dividing by zero.
+- app.py reuses `background_in_scope`/`background_desc`, the same two values already
+  computed for the location hexbin's background -- whatever's being compared against there
+  (league average or a chosen pitcher) is the same thing dashed in here, not a separate
+  comparison target with its own selection.
+- New checkbox, "Show comparison lines on the rate chart" (default on, next to the other
+  pitcher-comparison controls), since a busy 8-trace chart isn't always wanted.
+- 3 new tests (dashed traces get the right color/dash/showlegend, the key traces are named
+  correctly, an empty comparison is skipped cleanly) -- 30 total, all passing. Verified live:
+  built the real figure for Rasmussen vs. league average directly and printed every trace's
+  name/dash/color/showlegend to confirm the actual rendered output, and exercised the
+  checkbox toggle through `streamlit.testing.v1.AppTest` against live data with zero
+  exceptions.
+
+# 9/22/2026 (cont'd): "First Last" display names, still sorted by last name
+
+Statcast's player_name is "Last, First" -- which is exactly why sorting the raw strings
+alphabetically already sorts by last name, but reads worse in a dropdown or a chart title
+than "First Last" does. User asked for the display fixed without losing that sort order.
+
+- `names.py` (new): `to_first_last(player_name)`, a plain `", "`-split. Suffixes (Jr., II,
+  III, IV) stay attached to the last name since Statcast already puts them before the comma
+  ("Leiter Jr., Mark" -> "Mark Leiter Jr."); a name with no comma passes through unchanged
+  (covers the "All pitchers" sentinel, which isn't a real player_name).
+- Every dataframe filter, dict lookup, and `_load_pitcher_engineered` call in app.py still
+  keys on the raw "Last, First" string -- nothing about the underlying data or matching
+  logic changed. Only the text actually shown to the user was touched: the two pitcher
+  selectboxes now pass `format_func=to_first_last` (Streamlit's own built-in for exactly
+  this -- display one thing, keep the widget's real value as the option string, so the
+  options list itself, and therefore the sort order, is untouched), and every other
+  display site (checkbox/button labels, chart titles, the overlay's legend label, the
+  zone-share chart's title and comparison key, the "no pitches" info message, and the
+  season-pull spinner/warning inside `_load_pitcher_engineered`) got an explicit
+  `to_first_last(...)` call.
+- One easy-to-miss spot: `build_comparison_rows`'s `overlay_label` argument flows straight
+  into `location_figure`'s legend text, so it needed converting at the call site in app.py
+  even though nothing about `build_comparison_rows` or `location_figure` itself changed --
+  those two stay name-format-agnostic, just displaying whatever label string they're given.
+- 4 new tests (`test_names.py`) -- 34 total, all passing. Verified live via `AppTest` and a
+  direct figure build: dropdown options came back as `['All pitchers', 'Andrew Abbott',
+  'Mick Abel', 'Bryan Abreu', 'Jason Adam', 'Zach Agnos']` (still last-name order: Abbott <
+  Abel < Abreu < Adam < Agnos), and a real location/zone-share figure for Drew Rasmussen
+  showed "Drew Rasmussen" in the suptitle, legend, chart title, and comparison key --
+  nowhere left showing "Rasmussen, Drew".
+
+# 9/22/2026 (cont'd): opaque legend background on the zone-share chart
+
+User feedback: the plotly legend was hard to read wherever it landed over a line. Added
+`legend=dict(bgcolor=..., bordercolor=..., borderwidth=1)` to `zone_share_figure`'s layout
+(translucent white, light gray border) -- unconditional, not tied to the comparison feature,
+since the same legibility problem exists with just the four base zone-group lines. 1 new
+test (legend has a non-null bgcolor); 35 total, all passing.
+
+# 9/22/2026 (cont'd): legend text was still white, plus "League Average" capitalization
+
+User follow-up: the new legend background showed up, but its text stayed white -- unreadable
+against the new white box. Root cause: `st.plotly_chart` defaults to `theme="streamlit"`,
+which overlays Streamlit's own (here, dark-mode) font color on top of the figure without
+touching an already-set background, since bgcolor and font color are set independently.
+- Two fixes, not one, since either alone leaves a gap: `zone_share_figure`'s legend now sets
+  an explicit `font=dict(color="#111111")`, guaranteeing readable text regardless of theme.
+  Separately, its `st.plotly_chart` call passes `theme=None`, so Streamlit stops overlaying
+  its own theme on this chart at all and the figure's own `plotly_white` styling (already
+  chosen deliberately) governs everywhere, not just the one spot that was visibly broken.
+- Also asked for "League Average" (title case) in the legend. `LEAGUE_LABEL` was already
+  "League average"; fixed the constant itself to "League Average" and dropped the `.lower()`
+  call that had been building `background_desc` from it, so the same capitalization now
+  shows consistently in the "Compare against" radio, the hexbin's title_suffix, and the
+  zone-share legend key, rather than three different casings for the same word.
+- Verified directly against a real figure: legend bgcolor/font color both confirmed set, and
+  the key trace names read `['Drew Rasmussen', 'League Average']`. 35 tests still passing
+  (no behavior this touches was under test beyond the existing legend-bgcolor check).
+
+# 9/22/2026 (cont'd): no gridlines on the zone-share chart
+
+User asked for the gridlines off. `showgrid=False` on both axes in `zone_share_figure`'s
+layout (folded `xaxis_title`/`yaxis_title`/`yaxis_tickformat` into explicit `xaxis=dict(...)`/
+`yaxis=dict(...)` blocks to add it cleanly rather than mixing shorthand and dict forms). 1
+new test; 36 total, all passing.

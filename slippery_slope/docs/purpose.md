@@ -19,6 +19,12 @@ Investigate how an at-bat's trajectory changes based on its early pitch results,
 3. Pitch-type strategy: Pitcher Plinko-style breakdown of arsenal usage by count, before vs. after a first-pitch ball
 4. Location strategy: once type-level patterns hold up, check whether pitch location shifts with count and after a first-pitch ball, per pitcher and leaguewide 
 
+### Tooling
+- `scripts/app.py`: an interactive version of item 4's location-strategy notebook (`notebooks/fastball_location.ipynb`), letting anyone pick any pitch type (or a whole Fastball/Breaking/Offspeed group) and, optionally, a pitcher instead of reading fixed fastball/leaguewide charts off the page
+- Loads its own small sample live via pybaseball rather than requiring `data/MLB_2021-2025.csv`, so it runs standalone; a few sample-size presets trade load time for a bigger bucket sample
+- Scope is that notebook's Stage A (location by count-leverage bucket) and Stage B (zone-code share by count) only. Stage C (the Location+ "meatball gap") needs `pitching_plus`'s trained models, which need a full run over the 3.5M-row dataset to build -- too heavy a dependency for an app meant to load in a couple of minutes, so it's left out. Count-leverage buckets are the notebook's own Stage 0 result on the full 2021-2025 data, not recomputed from the app's small live sample (see docs/dev_log.md)
+- Comparison modes: selected pitch types can be pooled into one view or split into one row per type, and a selected pitcher can be shown against the league or against another pitcher, with their own pitches optionally overlaid as points on the comparison group's density. A selected pitcher's own data comes from a full-season pull (`sample_data.load_pitcher_season`), not just the loaded window, since a specific pitcher's slice of a small league sample is too thin on its own
+
 ### Inspiration
 Throwaway code cell from Pitching+ showed that Graham Ashcraft had very good Stuff+ and average Location+, but Ashcraft's recent seasons have had above-average walk rates and limited success compared to other pitchers on the list(e.g. Skenes, Clase). 
 

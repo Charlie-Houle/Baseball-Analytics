@@ -11,8 +11,13 @@ Investigation of how a count shapes the rest of an at-bat, in particular whether
 
 Grew directly out of a `pitching_plus` finding: pitchers with strong Stuff+ but middling results (e.g. Graham Ashcraft, Dustin May) prompted the question of whether pitch quality alone explains outcomes, or whether count-driven strategy is part of the gap. See [`slippery_slope/docs/purpose.md`](slippery_slope/docs/purpose.md) and [`slippery_slope/docs/dev_log.md`](slippery_slope/docs/dev_log.md). In progress as of the most recent dev log entry — location strategy is underway, pitch-type strategy hasn't started yet.
 
+`slippery_slope/scripts/app.py` turns the location-strategy notebook (`notebooks/fastball_location.ipynb`) into an interactive Streamlit app: pick any pitch type and, optionally, a single pitcher, and see how location shifts across the three count-leverage buckets (Pitcher-ahead/Even/Hitter-ahead). It pulls its own small sample live via [pybaseball](https://github.com/jldbc/pybaseball) instead of needing the full `data/MLB_2021-2025.csv`, so it runs standalone. Launch it with:
+```
+streamlit run slippery_slope/scripts/app.py
+```
+
 ### Setup
 ```
 pip install -r requirements.txt        # or requirements-dev.txt to also run the test suite
 ```
-`pitching_plus` has a pytest suite (`pytest pitching_plus/tests`); `slippery_slope` is notebook-only.
+Both projects have a pytest suite: `pytest pitching_plus/tests` and `pytest slippery_slope/tests`.
