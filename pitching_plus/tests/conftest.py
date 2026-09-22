@@ -70,7 +70,7 @@ def _build_raw_df(
             # spin_axis: a noisy version of the angle pfx_x/pfx_z implies
             # under pure Magnus physics (stuff.py's own axis_differential
             # formula) rather than fully independent random, so
-            # axis_differential has genuine, non-degenerate signal to test.
+            # axis_differential has non-degenerate signal to test.
             movement_angle = np.degrees(np.arctan2(pfx_x, -pfx_z)) % 360
             spin_axis = (movement_angle + rng.normal(0, 25, size=n)) % 360
 
@@ -91,7 +91,7 @@ def _build_raw_df(
 
             # Give location AND stuff-like physics a real (if noisy)
             # relationship to run value, so both location.py's and
-            # stuff.py's models have genuine signal to find. Coefficients
+            # stuff.py's models have signal to find. Coefficients
             # bumped from the original location-only version so the
             # combined signal stays robust to sample noise now that it's
             # split three ways (location.py's/pitching.py's existing

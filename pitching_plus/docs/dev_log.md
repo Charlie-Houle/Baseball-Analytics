@@ -1368,3 +1368,59 @@
   each on the full 3.57M-row dataset; bestPitch+'s counterfactual search
   in progress) and unaffected by these edits, since neither touches scoring
   logic or column names.
+
+# 9/21/2026: bestPitch+ reported as a percent of value captured
+
+- User asked whether "{pitcher} achieved X% of the max possible value" would
+  read more easily than "the gap between the best and actual pitch was 10
+  Pitching+ points." Added it as a reporting layer, not a retool: the
+  counterfactual search, the joint model, the calibration, and
+  best_pitching_plus / pitch_bestpitch_plus are unchanged (worked on main,
+  no branch). Three new columns from add_bestpitch_plus:
+  pitch_bestpitch_plus_pct (100 * actual_smoothed / best_pitching_plus),
+  bestpitch_plus_pct (pitcher x pitch_type x season), and
+  bestpitch_plus_pct_reliable (>= MIN_PITCHES_FOR_SCORE in-scope pitches
+  behind the ratio, same bar as the other *_reliable flags).
+- Design choices, all confirmed with the user first. The ratio uses the two
+  100+ scores, not raw run value: the 100+ scale is 100*exp(k*z)/raw_ratio_mean,
+  strictly positive, so the ratio is always defined, while pitching_run_value
+  can be negative or near zero. It means "share of the achievable calibrated
+  score," not "share of runs." The season figure is 100 * mean(actual) /
+  mean(best) per group, not the mean of per-pitch percentages: the two differ
+  whenever best_pitching_plus varies within a group, and the mean of ratios
+  overweights pitches whose best score is small (same aggregate-first
+  principle as _calibrate in location.py/pitching.py). Not clipped at 100,
+  matching pitch_bestpitch_plus not being clipped at 0. A 100+ rescaling of
+  the percentage itself was left out on purpose.
+- add_bestpitch_plus now restores the input's index after the aggregate
+  merge (merge() resets it). Added 4 tests to test_bestpitch.py (ratio and
+  bounds, NaN scope identical to pitch_bestpitch_plus, ratio-of-means versus
+  mean-of-ratios on a group where they differ, reliability gate) and the
+  three columns to test_full_pipeline.py's column list. One trap in the
+  reliability test: bestpitch.py binds MIN_PITCHES_FOR_SCORE at import, so it
+  has to be patched on bestpitch, not stuff. 36 tests pass.
+- Real-data run on all 3,565,743 pitches: add_bestpitch_plus took 2,578s
+  (stuff/location/pitching from cache; the counterfactual search is nearly
+  all of it). 3,521,210 pitches get a percentage, and the NaN mask is
+  identical to pitch_bestpitch_plus. Pitch level: min 31.6, median 93.1,
+  mean 91.8, max 100.0; every value > 0, none above 100, and 3.74% sit at
+  ~100 (the actual pitch was the best candidate). Season level: 17,545
+  groups, 14,343 reliable, median 92.0, middle half 90.7-93.2, range
+  68.7-97.6. Across 3,590 pitcher-seasons (all pitch types, >= 100 pitches)
+  the Spearman correlation between mean point gap and percent captured is
+  -0.997, so the two versions rank pitchers almost identically.
+- Finding: the range is compressed. Both scores sit on a 100-centered scale,
+  so a typical pitch already captures about 92% and pitcher-season values
+  have a standard deviation of 1.0 (82.8 to 95.2). A difference of one or two
+  points is meaningful, and 92% should not be read as "missed 8% of the
+  value." The percentage is easier to say aloud but spreads pitchers less
+  than the point gap does. Measuring capture relative to 100 instead (edge
+  over average) would spread it out but breaks when the actual score is
+  below 100, and rescaling the percentage to 100 = league average is the
+  natural follow-up; neither is built.
+- Not checked: the bottom of the pitcher-season list (Lugo 2023 at 82.8%,
+  Newcomb, Fairbanks) may partly reflect the max-over-candidates effect from
+  the 8/27 and 8/30 entries, where a pitcher with more candidates gets a
+  higher best_pitching_plus regardless of decision quality. Untested. The top
+  (Campbell 2025, deGrom 2024, Pomeranz 2025, Hill 2025) is plausible.
+  bestpitch.ipynb was not rerun and does not show the new columns.

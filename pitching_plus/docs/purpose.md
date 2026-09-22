@@ -51,13 +51,15 @@ Create "+" style model that scores on following fronts:
 
 ### bestPitch+: 
 - Identify, given pitch arsenal, best pitch/general location to throw it in (allowing for "zone," not a pinpoint)
-- Given pitcher arsenal (using avg. Stuff+ and Location+ from spot), calculate hypothetical Pitching+ score (bestPitch)
+- Given pitcher arsenal (using each candidate pitch type's own average physics, paired with a candidate zone's location, run through Pitching+'s own joint model), calculate hypothetical Pitching+ score (bestPitch)
 - Identify if pitch "idea" was good (right pitch type/location)
 - bestPitch - Pitching+ = bestPitch+ 
 - bestPitch is a max over real candidate pitches, and the actual pitch is one of those candidates, so bestPitch+ should be positive or close to 0
+- Also reported as percent of value captured: Pitching+ / bestPitch x 100, computed on the 100+ scores (always above 0, at most 100). "Achieved 92% of the best achievable score in that situation." This is a share of the calibrated score, not of runs. The season figure is the ratio of a group's mean actual to its mean bestPitch, not the mean of per-pitch percentages
+- Both scores are centered on 100, so a typical pitch captures about 92% and pitcher-seasons run roughly 83-95%. A one- or two-point difference is meaningful, and the point gap ranks pitchers almost identically (Spearman -0.997) with more spread
 
 ### Planned Workflow
 1. Stuff+: Calculate Stuff+ figures for each pitch type
 2. Location+: run expectancy change for pitch thrown in location given type and situation
-3. Pitching+: identify weight that seems to produce best results (target is delta_pitcher_run_exp, Statcast's own RE288-consistent per-pitch run expectancy change)
+3. Pitching+: train a joint model on physics + location/count/situational features together (target is delta_pitcher_run_exp, Statcast's own RE288-consistent per-pitch run expectancy change)
 4. bestPitch+: identify discrepancy between Pitching+ and the optimal pitch (scores and run expectancy change)

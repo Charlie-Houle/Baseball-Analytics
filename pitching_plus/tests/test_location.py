@@ -55,7 +55,7 @@ def test_plate_z_rel_and_armside():
     np.testing.assert_allclose(engineered["plate_z_rel"].to_numpy(), 0.5)
     # Keyed only on p_throws (R, R, L, L) -- identical across the two
     # different `stand` values in rows 0-1 and rows 2-3, confirming it's
-    # genuinely independent of batter stand, not just differently signed.
+    # independent of batter stand, not just differently signed.
     np.testing.assert_allclose(engineered["plate_x_armside"].to_numpy(), [-0.7, -0.7, 0.7, 0.7])
     assert engineered["platoon_matchup"].tolist() == [1, 0, 0, 1]
 

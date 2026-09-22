@@ -64,6 +64,22 @@ dataframe and returns it with:
                              nearly every pitch, since the actual
                              combination is always one of the candidates
                              considered (see notebooks/bestpitch.ipynb).
+  - `pitch_bestpitch_plus_pct` : the same comparison as a percentage of value
+                             captured, 100 * actual / best_pitching_plus
+                             ("this pitch achieved X% of the best achievable
+                             score in this situation"). Uses the 100+ scores,
+                             not raw pitching_run_value: the 100+ scale is
+                             strictly positive, so the ratio is always
+                             defined, while expected runs can be negative or
+                             near zero. Read it as a share of the calibrated
+                             score, not a share of runs.
+  - `bestpitch_plus_pct`   : pitcher x pitch_type x season aggregate of that
+                             percentage, computed as a ratio of the group's
+                             mean actual to its mean best_pitching_plus, not
+                             a mean of per-pitch percentages (see
+                             _bestpitch_plus_pct_agg).
+  - `bestpitch_plus_pct_reliable` : whether that group had at least
+                             MIN_PITCHES_FOR_SCORE pitches behind the ratio.
 
 Calls add_stuff_plus/add_location_plus/add_pitching_plus itself if their
 columns aren't already present. Requires a cached Pitching+ model (via
@@ -83,7 +99,10 @@ try:
         _build_features,
     )
     from .pitching import JOINT_FEATURES, add_pitching_plus
-    from .stuff import JUNK_PITCH_TYPES, PITCH_TYPE_COL, PITCHER_COL, SEASON_COL, STUFF_FEATURES
+    from .stuff import (
+        JUNK_PITCH_TYPES, MIN_PITCHES_FOR_SCORE, PITCH_TYPE_COL, PITCHER_COL,
+        SEASON_COL, STUFF_FEATURES,
+    )
 except ImportError:
     import pitching as pitching_mod
     import stuff as stuff_mod
@@ -92,7 +111,10 @@ except ImportError:
         _build_features,
     )
     from pitching import JOINT_FEATURES, add_pitching_plus
-    from stuff import JUNK_PITCH_TYPES, PITCH_TYPE_COL, PITCHER_COL, SEASON_COL, STUFF_FEATURES
+    from stuff import (
+        JUNK_PITCH_TYPES, MIN_PITCHES_FOR_SCORE, PITCH_TYPE_COL, PITCHER_COL,
+        SEASON_COL, STUFF_FEATURES,
+    )
 
 # ============================================================
 # CONFIGURATION
@@ -529,12 +551,52 @@ def _search_best_pitching_plus(engineered, arsenal_physics, models, zone_ref, pi
 # PUBLIC ENTRY POINT
 # ============================================================
 
+def _bestpitch_plus_pct_agg(result, actual_col):
+    """
+    Pitcher x pitch_type x season value-captured percentage:
+    100 * mean(actual_smoothed) / mean(best_pitching_plus) over exactly the
+    rows that have a real pitch_bestpitch_plus_pct. A ratio of each group's
+    own aggregated totals, NOT the mean of each pitch's own percentage: the
+    two differ whenever best_pitching_plus varies across a group's rows, and
+    averaging per-pitch ratios would overweight pitches whose own (smaller)
+    best_pitching_plus happened to make a fixed gap look large. Same
+    aggregate-first principle as pitching.py's/location.py's _calibrate,
+    which build season-level scores from the mean of the raw value rather
+    than from already-scaled per-pitch numbers.
+
+    `bestpitch_plus_pct_reliable` uses MIN_PITCHES_FOR_SCORE, the bar every
+    other module's aggregate `*_reliable` flag uses, counted over the pitches
+    that actually back the ratio (non-null pitch_bestpitch_plus_pct), not the
+    pitcher-season's total pitch count.
+    """
+
+    in_scope = result.dropna(subset=["pitch_bestpitch_plus_pct"]).copy()
+    in_scope["_actual_smoothed"] = actual_col.loc[in_scope.index]
+
+    agg = (
+        in_scope
+        .groupby([PITCHER_COL, PITCH_TYPE_COL, SEASON_COL], observed=True)
+        .agg(
+            mean_best=("best_pitching_plus", "mean"),
+            mean_actual=("_actual_smoothed", "mean"),
+            n_pitches=("pitch_bestpitch_plus_pct", "count"),
+        )
+        .reset_index()
+    )
+    agg["bestpitch_plus_pct"] = 100 * agg["mean_actual"] / agg["mean_best"]
+    agg["bestpitch_plus_pct_reliable"] = agg["n_pitches"] >= MIN_PITCHES_FOR_SCORE
+    return agg[[PITCHER_COL, PITCH_TYPE_COL, SEASON_COL, "bestpitch_plus_pct", "bestpitch_plus_pct_reliable"]]
+
+
 def add_bestpitch_plus(raw_df, models_dir=DEFAULT_MODELS_DIR, retrain=False, verbose=False):
     """
-    Takes a raw Statcast dataframe and returns a copy with `best_pitching_plus`
-    and `pitch_bestpitch_plus` columns added. Row count and order match the
-    input; pitches out of scope (no Pitching+ score, or no reliable arsenal
-    for that pitcher-season) get NaN in the new columns.
+    Takes a raw Statcast dataframe and returns a copy with `best_pitching_plus`,
+    `pitch_bestpitch_plus`, `pitch_bestpitch_plus_pct`, `bestpitch_plus_pct`,
+    and `bestpitch_plus_pct_reliable` columns added. Row count and order match
+    the input; pitches out of scope (no Pitching+ score, or no reliable arsenal
+    for that pitcher-season) get NaN in the pitch-level columns. The two
+    aggregate columns are merged on (pitcher, pitch_type, season), so every
+    pitch in a group carries that group's value.
 
     The counterfactual search (see _search_best_pitching_plus) is the
     expensive part of this call -- minutes on the full dataset. Pass
@@ -621,6 +683,20 @@ def add_bestpitch_plus(raw_df, models_dir=DEFAULT_MODELS_DIR, retrain=False, ver
     )
 
     result["pitch_bestpitch_plus"] = result["best_pitching_plus"] - actual_col
+
+    # Both operands are on the strictly positive 100+ scale, so the ratio is
+    # always defined (NaN wherever either side is NaN, same scope as
+    # pitch_bestpitch_plus). Deliberately not clipped at 100, for the same
+    # reason pitch_bestpitch_plus isn't clipped at 0: the fmax floor above
+    # already guarantees it, and clipping would hide a violation.
+    result["pitch_bestpitch_plus_pct"] = 100 * actual_col / result["best_pitching_plus"]
+
+    # merge() resets the index; a left merge on a unique key preserves row
+    # order, so restoring the input's index is a straight relabel.
+    agg_cols = _bestpitch_plus_pct_agg(result, actual_col)
+    original_index = result.index
+    result = result.merge(agg_cols, on=[PITCHER_COL, PITCH_TYPE_COL, SEASON_COL], how="left")
+    result.index = original_index
 
     return result
 

@@ -272,3 +272,98 @@ def test_arsenal_physics_avg_only_uses_reliable_rows(make_raw_df, small_stuff_th
     output_keys = set(map(tuple, avg[["pitcher", "pitch_type", "game_year"]].to_numpy()))
     assert output_keys <= reliable_keys
     assert len(output_keys) > 0
+
+
+def _actual_smoothed(df):
+    # pitch_bestpitch_plus is defined as best_pitching_plus - actual_smoothed,
+    # so the actual score is recoverable exactly without exposing it as a column.
+    return df["best_pitching_plus"] - df["pitch_bestpitch_plus"]
+
+
+def test_pitch_bestpitch_plus_pct_matches_ratio_and_is_bounded(
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, small_pitching_thresholds, tmp_path
+):
+    raw = make_raw_df(n_per_type=300, pitch_types=("FF", "SL", "CU"), n_pitchers=10)
+    result = bestpitch.add_bestpitch_plus(raw, models_dir=tmp_path, retrain=True)
+
+    in_scope = result.dropna(subset=["pitch_bestpitch_plus_pct"])
+    assert len(in_scope) > 0
+
+    expected = 100 * _actual_smoothed(in_scope) / in_scope["best_pitching_plus"]
+    np.testing.assert_allclose(in_scope["pitch_bestpitch_plus_pct"].to_numpy(), expected.to_numpy(), atol=1e-6)
+
+    # The 100+ scale is strictly positive, so the ratio is always > 0. It is
+    # <= 100 for the same reason pitch_bestpitch_plus >= 0 (the fmax floor),
+    # so it gets the same >90%-within-tolerance check rather than an exact one.
+    assert (in_scope["pitch_bestpitch_plus_pct"] > 0).all()
+    assert (in_scope["pitch_bestpitch_plus_pct"] <= 100 + 1e-4).mean() > 0.9
+
+
+def test_pitch_bestpitch_plus_pct_scope_matches_pitch_bestpitch_plus(
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, small_pitching_thresholds, tmp_path
+):
+    raw = make_raw_df(
+        n_per_type=300, pitch_types=("FF", "SL", "CU"), junk_pitch_types=("KN",),
+        n_pitchers=10, shuffled_index=True,
+    )
+    result = bestpitch.add_bestpitch_plus(raw, models_dir=tmp_path, retrain=True)
+
+    assert len(result) == len(raw)
+    assert result["pitch_bestpitch_plus_pct"].isna().equals(result["pitch_bestpitch_plus"].isna())
+
+    junk_rows = result["pitch_type"] == "KN"
+    assert junk_rows.any()
+    assert result.loc[junk_rows, "pitch_bestpitch_plus_pct"].isna().all()
+
+
+def test_bestpitch_plus_pct_aggregate_is_ratio_of_means_not_mean_of_ratios(
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, small_pitching_thresholds, tmp_path
+):
+    raw = make_raw_df(n_per_type=300, pitch_types=("FF", "SL", "CU"), n_pitchers=10)
+    result = bestpitch.add_bestpitch_plus(raw, models_dir=tmp_path, retrain=True)
+
+    in_scope = result.dropna(subset=["pitch_bestpitch_plus_pct"]).copy()
+    in_scope["actual"] = _actual_smoothed(in_scope)
+    keys = ["pitcher", "pitch_type", "game_year"]
+    grouped = in_scope.groupby(keys, observed=True)
+
+    ratio_of_means = 100 * grouped["actual"].mean() / grouped["best_pitching_plus"].mean()
+    mean_of_ratios = grouped["pitch_bestpitch_plus_pct"].mean()
+    reported = grouped["bestpitch_plus_pct"].first()
+
+    np.testing.assert_allclose(reported.to_numpy(), ratio_of_means.to_numpy(), atol=1e-6)
+    # The two aggregations only differ when best_pitching_plus varies within a
+    # group; require that at least one group actually does, so this test can
+    # tell the designs apart instead of passing on a fixture where they agree.
+    assert (reported - mean_of_ratios).abs().max() > 1e-6
+
+
+def test_bestpitch_plus_pct_reliable_gate(
+    make_raw_df, small_stuff_thresholds, small_location_thresholds, small_pitching_thresholds, tmp_path, monkeypatch
+):
+    raw = make_raw_df(n_per_type=300, pitch_types=("FF", "SL", "CU"), n_pitchers=10)
+
+    # bestpitch.py binds MIN_PITCHES_FOR_SCORE at import time (from-import), so
+    # patching stuff's copy can't reach it; patch bestpitch's own name.
+    monkeypatch.setattr(bestpitch, "MIN_PITCHES_FOR_SCORE", 1)
+    baseline = bestpitch.add_bestpitch_plus(raw, models_dir=tmp_path, retrain=True)
+    counts = (
+        baseline.dropna(subset=["pitch_bestpitch_plus_pct"])
+        .groupby(["pitcher", "pitch_type", "game_year"], observed=True)
+        .size()
+    )
+    threshold = int(counts.median())
+    assert (counts < threshold).any() and (counts >= threshold).any()
+
+    monkeypatch.setattr(bestpitch, "MIN_PITCHES_FOR_SCORE", threshold)
+    result = bestpitch.add_bestpitch_plus(raw, models_dir=tmp_path, retrain=False)
+
+    flags = result.groupby(["pitcher", "pitch_type", "game_year"], observed=True)["bestpitch_plus_pct_reliable"].first()
+    flags = flags.dropna().astype(bool)
+    expected = (counts >= threshold).reindex(flags.index)
+    assert (flags[expected.notna()] == expected.dropna()).all()
+
+    # Unreliable is not missing: the value is still reported, just flagged.
+    unreliable_keys = counts.index[counts < threshold]
+    unreliable_rows = result.set_index(["pitcher", "pitch_type", "game_year"]).loc[unreliable_keys]
+    assert unreliable_rows["bestpitch_plus_pct"].notna().all()

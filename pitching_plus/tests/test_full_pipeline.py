@@ -30,6 +30,7 @@ def test_run_pipeline_end_to_end(
         "location_run_value", "pitch_location_plus", "location_plus",
         "pitch_pitching_plus", "pitching_plus",
         "best_pitching_plus", "pitch_bestpitch_plus",
+        "pitch_bestpitch_plus_pct", "bestpitch_plus_pct", "bestpitch_plus_pct_reliable",
     ]
     for col in expected_cols:
         assert col in result.columns

@@ -1,9 +1,10 @@
 """
-Location+: an actual trained model (unlike Stuff+, a standardized index with
-no outcome data) that predicts a pitch's expected run value from where/when
-it was thrown: pitch type, location (batter-zone-relative, arm-side-
-adjusted), RE288 situation (base-out state x count), and handedness. See
-pitching_plus/notebooks/location.ipynb for the full derivation and validation.
+Location+: an actual trained model, like Stuff+, but on location/count/
+situational features instead of physics -- predicts a pitch's expected run
+value from where/when it was thrown: pitch type, location (batter-zone-
+relative, arm-side-adjusted), RE288 situation (base-out state x count), and
+handedness. See pitching_plus/notebooks/location.ipynb for the full
+derivation and validation.
 
 Public entry point is `add_location_plus`, which takes a raw Statcast
 dataframe and returns it with:
