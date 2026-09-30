@@ -45,14 +45,14 @@ streamlit run slippery_slope/scripts/app.py
 ```
 
 <p align="center">
-  <img src="assets/slippery_slope/app_location_by_count.png" width="95%" alt="App screenshot: Paul Skenes fastball locations vs league average, by count-leverage bucket">
+  <img src="assets/slippery_slope/app_location_by_count.png" width="95%" alt="App screenshot: Chris Sale breaking-ball locations vs league average, by count-leverage bucket">
 </p>
-<p align="center"><sub>Live app output — Paul Skenes' 2025 fastballs (cyan points) overlaid on the league-average background, split by count leverage. Skenes climbs the zone as the count tilts in his favor and works the arm-side edge once he's fallen behind.</sub></p>
+<p align="center"><sub>Live app output: Chris Sale's 2025 breaking balls (all sliders; cyan points) overlaid on the league-average breaking-ball background (a ~100K-pitch window), split by count leverage. Sale works the bottom of the zone and below it, with a second cluster of chases off the arm-side edge.</sub></p>
 
 <p align="center">
-  <img src="assets/slippery_slope/app_zone_share.png" width="80%" alt="App screenshot: zone-share by count, Paul Skenes vs league average">
+  <img src="assets/slippery_slope/app_zone_share.png" width="80%" alt="App screenshot: zone-share by count, Chris Sale breaking balls vs league average">
 </p>
-<p align="center"><sub>The app's companion chart: share of pitches landing in each zone group (Heart/Edge/Corner/Chase) by count. Solid lines are the selected pitcher, dashed lines are the comparison group — here, Skenes leans on the edge of the zone far more than league average once ahead in the count.</sub></p>
+<p align="center"><sub>The app's companion chart: share of pitches landing in each zone group (Heart/Edge/Corner/Chase) by count. Solid lines are the selected pitcher, dashed lines are the comparison group. Here, Sale buries his slider out of the zone even more than league average when ahead (81% Chase/Ball at 0-2 vs. ~74%), then stays in the zone more than league average once the count evens up (34% Chase/Ball vs. ~46% at 3-2). The far-right counts (2-0, 3-1, 3-0) rest on 16, 8 and 1 pitches respectively, so read them as noise.</sub></p>
 
 ### Setup
 

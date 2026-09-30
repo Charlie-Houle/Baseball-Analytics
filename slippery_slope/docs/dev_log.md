@@ -498,3 +498,128 @@ User asked for the gridlines off. `showgrid=False` on both axes in `zone_share_f
 layout (folded `xaxis_title`/`yaxis_title`/`yaxis_tickformat` into explicit `xaxis=dict(...)`/
 `yaxis=dict(...)` blocks to add it cleanly rather than mixing shorthand and dict forms). 1
 new test; 36 total, all passing.
+
+# 9/24/2026: lighter overlay default, README screenshots switched to Chris Sale (breakers)
+
+User feedback: the pitcher overlay was still hard to read over the hexbin's bright core, and
+the README front page should show Chris Sale on the ~100K-pitch sample with breaking balls
+only.
+- `DEFAULT_OVERLAY_ALPHA` in app.py: 0.6 -> 0.35 (also the slider's default; the slider
+  itself still runs 0.1-1.0). Rendered 0.6 / 0.35 / 0.2 side by side before choosing: 0.35
+  lets the density show through, while 0.2 washes the cyan rings out entirely over the
+  yellow core. No change to `location_figure`'s own `overlay_alpha` default (1.0), since
+  that is the function's contract for any non-app caller.
+- Both README app screenshots (`assets/slippery_slope/app_location_by_count.png`,
+  `app_zone_share.png`) regenerated with the app's real pipeline (`load_sample` over the
+  "~100K pitches (26 days)" preset ending 2025-06-08 (101,217 pitches loaded, 100,434 in
+  scope), plus `load_pitcher_season` for Sale's 2025 season, breaking types CU/KC/SL/ST/SV,
+  league-average background). Sale threw 968 breaking pitches in the season, all sliders. README
+  alt text and captions rewritten to match; the two images use identical parameters on purpose
+  so the pair reads as one example rather than two different ones.
+- Caveat noted in the README caption: Sale's zone-share lines at 2-0, 3-1 and 3-0 rest on
+  16, 8 and 1 pitches (hence the 100% Corner spike at 3-0), so the right edge of that chart is
+  noise. Left as the app would draw it rather than trimmed, so the screenshot stays a
+  faithful copy of the app's output.
+
+# 9/24/2026 (cont'd): strike zone drawn above everything
+
+User asked for the strike-zone outline to be plotted above everything. In `location_figure`
+the zone was a plain `ax.plot` (matplotlib's default line zorder of 2), which sits above the
+hexbin (1) but *below* the overlay scatter's `zorder=5`, so the pitcher's points were drawn
+over the box.
+- New `ZONE_ZORDER = 10` in location_view.py, applied to the zone outline.
+- `fastball_location.ipynb`'s Stage A cell got the same `zorder=10` (a one-line source
+  change; saved outputs untouched). There the zone was already above the hexbin since that
+  chart has no overlay, so nothing visibly changes. The edit just makes the intent explicit and
+  keeps it from silently regressing if an overlay is ever added there.
+- 1 new test (zone line's zorder is `ZONE_ZORDER` and above every collection on the axes); 37
+  total, all passing.
+- Follow-up in the same session: with the zone on top, its black outline was still hard to
+  see where the hexbin is near-black (e.g. the top edge in the Pitcher-ahead panel). Added a
+  thin translucent white halo (`pe.withStroke`, `ZONE_HALO_WIDTH = 2.1`, `ZONE_HALO_ALPHA =
+  0.55`) around it in `location_figure`. Rendered a heavier 2.8pt/85% version first; it read as
+  a double outline at README size, so the lighter one won. Figure title changed from "black
+  box = strike zone" to "boxed outline = strike zone", and the app's "What am I looking at?"
+  text now mentions the halo. The notebook's white zone line got no halo, since it's already
+  white. 1 new test (zone line carries a white path effect at `ZONE_HALO_ALPHA`); 38 total, all
+  passing.
+- README's first screenshot re-rendered from the real code path after both changes, so it
+  shows exactly what the app draws.
+
+# 9/24/2026 (cont'd): different pitch types per side, and graceful empty/failed states
+
+User asked for (3a) a comparison of one side's pitch type(s) against the other's (e.g. all
+league-average fastball locations against Paul Skenes' splitter) and (3b) for the app to stop
+breaking when they clicked around during pitcher-vs-pitcher loads, with blank fields handled
+("Pick at least one pitch for each pitcher").
+
+**3a: separate pitch-type lists per side.**
+- With a pitcher selected there's now a "Use different pitch types for <comparison side>"
+  checkbox. Off (the default) is the old behavior, one shared list. On, the comparison side --
+  league average or the comparison pitcher, gets its own multiselect plus its own bulk-by-
+  category picker, seeded from the pitcher's current selection so it never opens empty.
+  Works against both league average and another pitcher, not only league.
+- `build_comparison_rows` takes a new `overlay_types` argument (the background keeps
+  `selected_types`); it raises if combined with `compare_types`, because per-type rows need both
+  sides on the same types. The app hides "Compare pitch types side by side" while different
+  types are on for the same reason.
+- When the sides differ, each is labeled with its types (`League Average [FC/FF/SI]`, `Paul
+  Skenes [FS]`) in the figure title, overlay legend, per-panel counts, and the zone-share
+  chart's solid/dashed key. When they don't, labels are unchanged.
+- Checked with the exact example from the request over the ~100K-pitch window: 55,683
+  league FC/FF/SI pitches (background) vs. Skenes' 455 splitters (points).
+
+**3b: what was actually breaking.** Couldn't reproduce a crash through ordinary clicking (AppTest
+walkthroughs of pitcher-vs-pitcher, same-pitcher-in-both-slots, side-by-side mode, clearing the
+pitch-type list, etc. all ran clean), so a randomized stress test was written: batched widget
+changes applied to a single rerun (how Streamlit sees clicks queued during a load), plus injected
+fetch failures (ConnectionError, KeyError, empty frame, frame missing columns, a 2-row frame).
+Against the pre-change app, 160 steps produced exactly one class of crash: any failed season
+pull other than an empty result (`ValueError`) propagated as a raw traceback. Pitcher-vs-pitcher
+makes two such pulls per run, and a page that's mid-load when someone clicks something else is
+the likeliest time for one to fail, which is consistent with what was reported (the exact
+failure the user saw wasn't captured, so this is the best-supported cause, not a confirmed one).
+- `_load_pitcher_engineered` now falls back to the pitcher's rows from the loaded window on
+  *any* exception (previously only `ValueError`), with the warning naming the error type.
+- The initial league-sample load got the same treatment: any non-`ValueError` failure is now a
+  plain `st.error` naming the date range, instead of a traceback. (The stress test's injected
+  failures only wrapped the per-pitcher pull, so this one was checked separately: a simulated
+  ConnectionError on an uncached date range now shows the error message, no traceback.)
+- Blank states now each say what's wrong: `missing_selection_message` ("Pick at least one pitch
+  type for League Average." / "...for each side of the comparison (Paul Skenes and Mick Abel).")
+  and `empty_side_notes` ("Mick Abel has no KC pitches in this sample.") replace the old one
+  message that only fired when *both* sides were empty, which left a lone empty side as a
+  silently blank panel. The page still stops only when every side is empty.
+- The old zone-share "no pitches" info line was dropped; the per-side note above it says the
+  same thing with the pitcher's name and types.
+- 8 new tests in test_location_view.py (overlay_types filtering/default/guard, both message
+  helpers, empty-side notes); 46 total, all passing. app.py itself has no automated tests (same
+  as before); it was exercised through the AppTest walkthroughs and the stress test above.
+  Re-running the stress test against the finished app (3 seeds x 100 steps, same injected
+  failures plus the new different-types widgets in the random action pool): 0 failures.
+
+# 9/30/2026: avoid-ai-writing pass over the uncommitted changes
+
+Ran the avoid-ai-writing skill over the pending diff: README captions and alt text, the 9/24 dev
+log entries, comments and docstrings in app.py, location_view.py and test_location_view.py, the
+notebook's one changed line, UI strings, and the figure titles. Text was already mostly plain;
+the main finding was dash splices (` -- ` and an em dash) in prose.
+- Replaced those with colons, commas, parentheses or a sentence break in the README captions, the
+  9/24 dev log entries, the two `app.py` docstrings, the "What am I looking at?" text, and the
+  location figure's suptitle, which now reads "(boxed outline = strike zone): <title suffix>".
+- Dropped "still" from the `DEFAULT_OVERLAY_ALPHA` comment, which narrated the change from 0.6
+  rather than describing the value.
+- Left alone on purpose: the ` -- ` after `# noqa: BLE001` (two lines in `app.py`, kept so the
+  linter directive stays untouched); "actually" in "what was actually breaking", which marks a
+  real contrast with the reported symptom.
+- Zone-share chart retitled at the user's request: "Where in the zone pitches go, by count -- X"
+  was hard to read as a title, so it is now "Pitch Locations by Count: X" (or "X vs Y" when the
+  comparison lines are drawn; an empty comparison draws nothing, so the title doesn't claim one).
+  With no pitcher selected, X is "All Pitchers" (was the lowercase "all pitchers"). The x-axis
+  label lost its ` -- not alphabetical` tail and now reads "Count (balls-strikes), ordered
+  pitcher-ahead to hitter-ahead". 1 new test; 47 total, all passing.
+- Regenerated both README screenshots from the current code, using the same parameters as the
+  9/24 render (26-day window ending 2025-06-08, Sale's 2025 season, breaking types, league-average
+  background, overlay opacity 0.35; 101,217 pitches loaded, 100,434 in scope, 968 Sale sliders).
+  Both now show the new titles; the data in them is unchanged.
+- Nothing flagged in `infield_arm/` (empty scaffolding, only `__init__.py` files).
