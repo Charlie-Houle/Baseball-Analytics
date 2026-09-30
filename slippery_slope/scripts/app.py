@@ -21,14 +21,17 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "pitching_plus" / "scripts"))
 
 from sample_data import DEFAULT_END_DATE, DEFAULT_START_DATE, load_pitcher_season, load_sample  # noqa: E402
-from location_view import build_comparison_rows, engineer_pitches, location_figure, zone_share_figure  # noqa: E402
+from location_view import (  # noqa: E402
+    build_comparison_rows, empty_side_notes, engineer_pitches, location_figure, missing_selection_message,
+    zone_share_figure,
+)
 from count_leverage import counts_by_bucket  # noqa: E402
 from names import to_first_last  # noqa: E402
 from pitch_groups import PITCH_CATEGORIES, types_for_categories  # noqa: E402
 
 LEAGUE_LABEL = "League Average"
 ANOTHER_PITCHER_LABEL = "Another pitcher"
-DEFAULT_OVERLAY_ALPHA = 0.6  # full opacity made the overlay points read as too heavy against the hexbin
+DEFAULT_OVERLAY_ALPHA = 0.35  # 0.6 read as too heavy over the hexbin's bright core; below ~0.25 the points wash out
 
 # Day-count for each preset (inclusive of both endpoints). Pitch counts are
 # approximate: measured once against the default 1-week range (27,228
@@ -61,7 +64,10 @@ def _load_pitcher_engineered(engineered, player_name, spinner_verb="Loading"):
     their own arsenal), since the main sample's window is deliberately small
     and a specific pitcher's slice of it is too thin to read much into. Falls
     back to that pitcher's own rows from the already-loaded window if the
-    season pull fails, so one bad request doesn't take down the whole page.
+    season pull fails for any reason, not just an empty result (a dropped
+    connection or a malformed response is just as likely, and pitcher-vs-
+    pitcher comparisons make two of these pulls per run), so one bad request
+    doesn't take down the whole page.
     """
     pitcher_rows = engineered.loc[engineered["player_name"] == player_name]
     pitcher_id = int(pitcher_rows["pitcher"].iloc[0])
@@ -71,9 +77,19 @@ def _load_pitcher_engineered(engineered, player_name, spinner_verb="Loading"):
         try:
             season_raw = _cached_pitcher_season(pitcher_id, season)
             return engineer_pitches(season_raw)
-        except ValueError as exc:
-            st.warning(f"Couldn't load a season sample for {display_name} ({exc}); using only the loaded window instead.")
+        except Exception as exc:  # noqa: BLE001 -- see docstring: any failed pull should degrade, not crash
+            reason = str(exc) if isinstance(exc, ValueError) else f"{type(exc).__name__}: {exc}"
+            st.warning(f"Couldn't load a season sample for {display_name} ({reason}); using only the loaded window instead.")
             return pitcher_rows
+
+
+def _label_with_types(label, types, show_types):
+    """
+    "Paul Skenes [FS]" when the two sides of a comparison are on different pitch
+    types (otherwise both sides are on the same ones, and the extra text would
+    only be clutter).
+    """
+    return f"{label} [{'/'.join(types)}]" if show_types else label
 
 
 def _explanation():
@@ -93,7 +109,7 @@ def _explanation():
             "lefty's and a righty's arm-side misses land on the same side of the chart instead "
             "of mirrored. The vertical axis is relative to *that batter's own* strike zone "
             "(0 = bottom, 1 = top), so hitters of different heights line up too. The black "
-            "outline is the strike zone.\n\n"
+            "outline (with a thin white halo, so it stays visible over dark areas) is the strike zone.\n\n"
             "**Zone groups** (the second chart): Heart is the middle of the zone (Statcast "
             "zone 5), Edge is the four zone-code regions just inside the border (2/4/6/8), "
             "Corner is the four true corners (1/3/7/9), and Chase/Ball is everything outside "
@@ -105,7 +121,11 @@ def _explanation():
             "another pitcher if you pick one under \"Compare against\" -- and the selected "
             "pitcher's own pitches, if the overlay checkbox is on, are the individual points "
             "drawn on top. \"Compare pitch types side by side\" gives each selected pitch type "
-            "its own row of three buckets instead of pooling them into one.\n\n"
+            "its own row of three buckets instead of pooling them into one. \"Use different "
+            "pitch types for ...\" gives the comparison side its own pitch-type list, e.g. "
+            "league-average fastballs (background) against one pitcher's splitter (points), "
+            "and labels each side with its types; it's mutually exclusive with the side-by-side "
+            "view, since per-type rows need both sides on the same types.\n\n"
             "**A selected pitcher's own points come from their whole season**, not just the "
             "sample window above, since a specific pitcher's slice of a one-week league sample "
             "is too thin to plot on its own -- the league-average background still reflects "
@@ -144,6 +164,12 @@ def main():
         except ValueError as exc:
             st.error(str(exc))
             st.stop()
+        except Exception as exc:  # noqa: BLE001 -- a dropped connection or bad response shouldn't show a raw traceback
+            st.error(
+                f"Couldn't load Statcast data for {start_date} to {end_date} ({type(exc).__name__}: {exc}). "
+                "Check your connection and try again, or pick a different date range."
+            )
+            st.stop()
 
     engineered = engineer_pitches(sample)
     st.caption(
@@ -170,6 +196,7 @@ def main():
         overlay_pitcher = None
         overlay_alpha = DEFAULT_OVERLAY_ALPHA
         show_rate_comparison = False
+        background_desc = LEAGUE_LABEL
 
         if selected_pitcher != "All pitchers":
             pitcher_engineered = _load_pitcher_engineered(engineered, selected_pitcher)
@@ -182,6 +209,7 @@ def main():
                 background_engineered = _load_pitcher_engineered(
                     engineered, background_pitcher, spinner_verb="Loading comparison pitcher"
                 )
+                background_desc = to_first_last(background_pitcher)
 
             if st.checkbox(f"Overlay {to_first_last(selected_pitcher)}'s pitches", value=True):
                 overlay_pitcher = selected_pitcher
@@ -227,51 +255,113 @@ def main():
 
             st.button(f"Limit to {to_first_last(selected_pitcher)}'s own pitch types", on_click=_limit_to_pitcher_types)
 
-        selected_types = st.multiselect("Pitch type(s)", pitch_types, key="pitch_type_select")
+        pitcher_label = to_first_last(selected_pitcher) if pitcher_engineered is not None else None
+        selected_types = st.multiselect(
+            f"Pitch type(s) for {pitcher_label}" if pitcher_label else "Pitch type(s)",
+            pitch_types, key="pitch_type_select",
+        )
+
+        use_different_types = False
+        comparison_types = selected_types
+        if pitcher_engineered is not None:
+            def _seed_comparison_types():
+                # Starts the comparison side from whatever the pitcher's side has, so switching this on
+                # never lands on an empty picker (which would just be an immediate "pick something").
+                st.session_state["comparison_pitch_type_select"] = list(st.session_state.get("pitch_type_select", []))
+
+            use_different_types = st.checkbox(
+                f"Use different pitch types for {background_desc}", key="use_different_types",
+                on_change=_seed_comparison_types,
+                help="Gives the comparison side its own pitch-type list, e.g. league-average fastballs vs. one "
+                     "pitcher's splitter.",
+            )
+            if use_different_types:
+                comparison_type_options = sorted(engineered["pitch_type"].dropna().unique())
+                if background_engineered is not None:
+                    comparison_type_options = sorted(
+                        set(comparison_type_options) | set(background_engineered["pitch_type"].dropna().unique())
+                    )
+
+                # Same stale-state guard as the pitcher's own list above: state left over from a different
+                # comparison pitcher or date range may hold a type that's no longer one of the options.
+                if "comparison_pitch_type_select" not in st.session_state:
+                    st.session_state["comparison_pitch_type_select"] = list(selected_types)
+                st.session_state["comparison_pitch_type_select"] = [
+                    pt for pt in st.session_state["comparison_pitch_type_select"] if pt in comparison_type_options
+                ]
+
+                def _apply_comparison_category_selection():
+                    wanted = types_for_categories(st.session_state["comparison_category_select"])
+                    st.session_state["comparison_pitch_type_select"] = [
+                        pt for pt in comparison_type_options if pt in wanted
+                    ]
+
+                st.multiselect(
+                    f"Bulk select {background_desc}'s types by category", PITCH_CATEGORIES,
+                    key="comparison_category_select", on_change=_apply_comparison_category_selection,
+                )
+                comparison_types = st.multiselect(
+                    f"Pitch type(s) for {background_desc}", comparison_type_options,
+                    key="comparison_pitch_type_select",
+                )
 
         compare_types = False
-        if len(selected_types) >= 2:
+        if len(selected_types) >= 2 and not use_different_types:
             compare_types = st.checkbox(
                 "Compare pitch types side by side",
                 help="One row of buckets per pitch type instead of pooling them into one.",
             )
 
-    if not selected_types:
-        st.warning("Pick at least one pitch type.")
+    selection_sides = [(pitcher_label, selected_types)]
+    if use_different_types:
+        selection_sides.append((background_desc, comparison_types))
+    missing_message = missing_selection_message(selection_sides)
+    if missing_message:
+        st.warning(missing_message)
         st.stop()
 
     background_source = background_engineered if background_engineered is not None else engineered
     overlay_source = pitcher_engineered if overlay_pitcher else None
 
-    background_in_scope = background_source[background_source["pitch_type"].isin(selected_types)]
-    overlay_in_scope = overlay_source[overlay_source["pitch_type"].isin(selected_types)] if overlay_source is not None else None
-    if background_in_scope.empty and (overlay_in_scope is None or overlay_in_scope.empty):
-        st.warning("No pitches match this pitch-type selection for either side of the comparison. Try different pitch types or a wider sample.")
+    background_in_scope = background_source[background_source["pitch_type"].isin(comparison_types)]
+    if pitcher_engineered is None:
+        pitcher_in_scope = None
+        scope_sides = [("All pitchers", selected_types, background_in_scope)]
+    else:
+        pitcher_in_scope = pitcher_engineered[pitcher_engineered["pitch_type"].isin(selected_types)]
+        scope_sides = [(pitcher_label, selected_types, pitcher_in_scope), (background_desc, comparison_types, background_in_scope)]
+
+    if all(in_scope.empty for _, _, in_scope in scope_sides):
+        st.warning("No pitches match this pitch-type selection. Try different pitch types or a wider sample.")
         st.stop()
+    # One side coming up empty isn't fatal (the other side still has something to show), but a blank
+    # panel with no explanation reads like a bug, so say which side it is.
+    for note in empty_side_notes(scope_sides):
+        st.warning(note)
+
+    overlay_label = _label_with_types(pitcher_label, selected_types, use_different_types) if overlay_pitcher else None
+    background_label = _label_with_types(background_desc, comparison_types, use_different_types)
 
     rows = build_comparison_rows(
-        selected_types, compare_types, background_source,
-        overlay_source=overlay_source, overlay_label=to_first_last(overlay_pitcher) if overlay_pitcher else None,
+        comparison_types, compare_types, background_source,
+        overlay_source=overlay_source, overlay_label=overlay_label,
+        overlay_types=selected_types if use_different_types else None,
     )
 
-    background_desc = to_first_last(background_pitcher) if background_pitcher else LEAGUE_LABEL
-    title_suffix = f"{background_desc} (background)"
+    title_suffix = f"{background_label} (background)"
     if overlay_pitcher:
-        title_suffix += f" vs {to_first_last(overlay_pitcher)} (points)"
+        title_suffix += f" vs {overlay_label} (points)"
 
     st.pyplot(location_figure(rows, title_suffix, overlay_alpha=overlay_alpha))
 
-    zone_source = pitcher_engineered if selected_pitcher != "All pitchers" else engineered
-    zone_title_suffix = to_first_last(selected_pitcher) if selected_pitcher != "All pitchers" else "all pitchers"
-    scoped = zone_source[zone_source["pitch_type"].isin(selected_types)]
+    scoped = pitcher_in_scope if pitcher_in_scope is not None else background_in_scope
+    zone_title_suffix = _label_with_types(pitcher_label, selected_types, use_different_types) if pitcher_label else "All Pitchers"
 
     zone_comparison, zone_comparison_label = None, None
     if show_rate_comparison:
-        zone_comparison, zone_comparison_label = background_in_scope, background_desc
+        zone_comparison, zone_comparison_label = background_in_scope, background_label
 
-    if scoped.empty:
-        st.info(f"{to_first_last(selected_pitcher)} has no pitches of the selected type(s) in this sample, so there's no zone-share chart to show.")
-    else:
+    if not scoped.empty:  # an empty pitcher side already got its own note above
         st.plotly_chart(
             zone_share_figure(scoped, zone_title_suffix, comparison=zone_comparison, comparison_label=zone_comparison_label),
             width="stretch",

@@ -118,6 +118,62 @@ def test_build_comparison_rows_overlay_source_carries_into_every_row(two_pitcher
     assert len(rows[1]["overlay"]) == 4
 
 
+def test_build_comparison_rows_overlay_types_filters_the_overlay_separately_from_the_background(two_pitcher_two_type_pitches):
+    engineered = location_view.engineer_pitches(two_pitcher_two_type_pitches)
+    test_pitcher_only = engineered[engineered["player_name"] == "Test Pitcher"]
+    # league-average fastballs (background) vs Test Pitcher's sliders (overlay)
+    rows = location_view.build_comparison_rows(
+        ["FF"], False, engineered, overlay_source=test_pitcher_only, overlay_label="Test Pitcher", overlay_types=["SL"],
+    )
+    assert len(rows) == 1
+    assert rows[0]["label"] == "FF vs SL"
+    assert set(rows[0]["background"]["pitch_type"]) == {"FF"} and len(rows[0]["background"]) == 8
+    assert set(rows[0]["overlay"]["pitch_type"]) == {"SL"} and len(rows[0]["overlay"]) == 4
+
+
+def test_build_comparison_rows_overlay_types_defaults_to_the_background_types(two_pitcher_two_type_pitches):
+    engineered = location_view.engineer_pitches(two_pitcher_two_type_pitches)
+    test_pitcher_only = engineered[engineered["player_name"] == "Test Pitcher"]
+    rows = location_view.build_comparison_rows(["FF"], False, engineered, overlay_source=test_pitcher_only)
+    assert set(rows[0]["overlay"]["pitch_type"]) == {"FF"}
+
+
+def test_build_comparison_rows_overlay_types_cant_be_combined_with_compare_types(two_pitcher_two_type_pitches):
+    engineered = location_view.engineer_pitches(two_pitcher_two_type_pitches)
+    with pytest.raises(ValueError, match="compare_types"):
+        location_view.build_comparison_rows(["FF", "SL"], True, engineered, overlay_source=engineered, overlay_types=["FF"])
+
+
+def test_missing_selection_message_is_none_when_every_side_has_a_selection():
+    assert location_view.missing_selection_message([("A", ["FF"]), ("League Average", ["SL"])]) is None
+    assert location_view.missing_selection_message([("All pitchers", ["FF"])]) is None
+
+
+def test_missing_selection_message_lone_side_gets_the_plain_message():
+    assert location_view.missing_selection_message([("All pitchers", [])]) == "Pick at least one pitch type."
+
+
+def test_missing_selection_message_names_the_one_empty_side():
+    message = location_view.missing_selection_message([("Paul Skenes", ["FS"]), ("League Average", [])])
+    assert message == "Pick at least one pitch type for League Average."
+
+
+def test_missing_selection_message_names_both_sides_when_both_are_empty():
+    message = location_view.missing_selection_message([("Paul Skenes", []), ("Mick Abel", [])])
+    assert message == "Pick at least one pitch type for each side of the comparison (Paul Skenes and Mick Abel)."
+
+
+def test_empty_side_notes_only_flags_sides_with_a_selection_but_no_pitches(two_pitcher_two_type_pitches):
+    engineered = location_view.engineer_pitches(two_pitcher_two_type_pitches)
+    other_pitcher = engineered[engineered["player_name"] == "Other Pitcher"]
+    notes = location_view.empty_side_notes([
+        ("Other Pitcher", ["SL", "CU"], other_pitcher[other_pitcher["pitch_type"].isin(["SL", "CU"])]),  # threw neither
+        ("Test Pitcher", ["FF"], engineered[(engineered["player_name"] == "Test Pitcher") & (engineered["pitch_type"] == "FF")]),
+        ("Nobody", [], engineered.iloc[0:0]),  # nothing selected: that's missing_selection_message's job, not this one's
+    ])
+    assert notes == ["Other Pitcher has no SL/CU pitches in this sample."]
+
+
 def test_build_comparison_rows_no_overlay_source_means_no_overlay(two_pitcher_two_type_pitches):
     engineered = location_view.engineer_pitches(two_pitcher_two_type_pitches)
     rows = location_view.build_comparison_rows(["FF"], False, engineered)
@@ -154,6 +210,27 @@ def test_location_figure_applies_overlay_alpha_to_the_overlay_points(two_pitcher
     fig = location_view.location_figure(rows, "league average (background) vs Test Pitcher (points)", overlay_alpha=0.35)
     overlay_collection = fig.axes[0].collections[-1]  # hexbin (if any) is added first, the overlay scatter last
     assert overlay_collection.get_alpha() == pytest.approx(0.35)
+
+
+def test_location_figure_draws_the_strike_zone_above_the_hexbin_and_overlay_points(two_pitcher_two_type_pitches):
+    engineered = location_view.engineer_pitches(two_pitcher_two_type_pitches)
+    test_pitcher_only = engineered[engineered["player_name"] == "Test Pitcher"]
+    rows = location_view.build_comparison_rows(
+        ["FF"], False, engineered, overlay_source=test_pitcher_only, overlay_label="Test Pitcher",
+    )
+    ax = location_view.location_figure(rows, "league average (background) vs Test Pitcher (points)").axes[0]
+    zone_zorder = ax.lines[-1].get_zorder()
+    assert zone_zorder == location_view.ZONE_ZORDER
+    assert all(collection.get_zorder() < zone_zorder for collection in ax.collections)
+
+
+def test_location_figure_gives_the_strike_zone_a_white_halo(two_pitcher_two_type_pitches):
+    engineered = location_view.engineer_pitches(two_pitcher_two_type_pitches)
+    rows = location_view.build_comparison_rows(["FF"], False, engineered)
+    zone_line = location_view.location_figure(rows, "league average (background)").axes[0].lines[-1]
+    halo = zone_line.get_path_effects()[0]
+    assert halo._gc["foreground"] == "white"
+    assert halo._gc["alpha"] == pytest.approx(location_view.ZONE_HALO_ALPHA)
 
 
 def test_hexbin_gridsize_scales_with_n_between_its_floor_and_ceiling():
@@ -212,3 +289,23 @@ def test_zone_share_figure_skips_comparison_when_it_is_empty(two_pitcher_two_typ
 
     assert all(trace.line.dash != "dash" for trace in fig.data)
     assert "Nobody" not in {trace.name for trace in fig.data}
+
+
+def test_zone_share_figure_title_names_the_subject_and_the_comparison(two_pitcher_two_type_pitches):
+    engineered = location_view.engineer_pitches(two_pitcher_two_type_pitches)
+    test_pitcher_only = engineered[engineered["player_name"] == "Test Pitcher"]
+    other_pitcher_only = engineered[engineered["player_name"] == "Other Pitcher"]
+
+    alone = location_view.zone_share_figure(test_pitcher_only, "Test Pitcher")
+    assert alone.layout.title.text == "Pitch Locations by Count: Test Pitcher"
+
+    compared = location_view.zone_share_figure(
+        test_pitcher_only, "Test Pitcher", comparison=other_pitcher_only, comparison_label="League Average",
+    )
+    assert compared.layout.title.text == "Pitch Locations by Count: Test Pitcher vs League Average"
+
+    # An empty comparison draws nothing, so the title shouldn't claim one.
+    empty = location_view.zone_share_figure(
+        test_pitcher_only, "Test Pitcher", comparison=engineered.iloc[0:0], comparison_label="Nobody",
+    )
+    assert empty.layout.title.text == "Pitch Locations by Count: Test Pitcher"

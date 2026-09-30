@@ -16,6 +16,7 @@ import matplotlib
 
 matplotlib.use("Agg")  # figures are handed to Streamlit/tests, never shown from this process directly
 
+import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 
@@ -37,6 +38,10 @@ REQUIRED_FOR_FEATURES = [
 ]
 
 ZONE_HALF_WIDTH_FT = 0.83  # standard plate-width-plus-ball-radius approximation, same as the notebook
+ZONE_ZORDER = 10  # above the hexbin (1) and overlay points (5) so the zone outline is never hidden by either
+# A thin translucent white halo around the black outline keeps it visible where the hexbin is near-black.
+ZONE_HALO_WIDTH = 2.1
+ZONE_HALO_ALPHA = 0.55
 ZONE_COLORS = {"Heart": "#c0392b", "Corner": "#eda100", "Edge": "#2a78d6", "Chase/Ball": "#c3c2b7"}
 
 MIN_HEXBIN_GRIDSIZE = 6
@@ -71,7 +76,42 @@ def engineer_pitches(sample):
     return engineered
 
 
-def build_comparison_rows(selected_types, compare_types, background_source, overlay_source=None, overlay_label=None):
+def missing_selection_message(sides):
+    """
+    `sides` is a list of (label, selected_types) pairs, one per side of the
+    comparison that has its own pitch-type picker. Returns the message to
+    show if any picker is empty, or None if every side has something
+    selected. A lone side gets the plain "Pick at least one pitch type."
+    since there's no other side to name it against.
+    """
+
+    if len(sides) == 1:
+        return None if sides[0][1] else "Pick at least one pitch type."
+    missing = [label for label, types in sides if not types]
+    if not missing:
+        return None
+    if len(missing) == 1:
+        return f"Pick at least one pitch type for {missing[0]}."
+    return f"Pick at least one pitch type for each side of the comparison ({' and '.join(missing)})."
+
+
+def empty_side_notes(sides):
+    """
+    `sides` is a list of (label, selected_types, in_scope_pitches) triples.
+    One note per side that has a selection but no pitches of those types in
+    its data, so a blank panel always comes with an explanation.
+    """
+
+    return [
+        f"{label} has no {'/'.join(types)} pitches in this sample."
+        for label, types, in_scope in sides
+        if types and in_scope.empty
+    ]
+
+
+def build_comparison_rows(
+    selected_types, compare_types, background_source, overlay_source=None, overlay_label=None, overlay_types=None,
+):
     """
     Builds location_figure's `rows` argument: one row per pitch type when
     `compare_types` is True, or a single row pooling every selected type
@@ -84,15 +124,28 @@ def build_comparison_rows(selected_types, compare_types, background_source, over
     league-wide window, or vice versa for a pitcher-vs-pitcher comparison.
     Each is filtered down to a row's pitch type(s) here; whichever rows
     (player, date range, etc.) belong in each source is the caller's call.
+
+    `selected_types` are the background's pitch types. By default the
+    overlay uses the same ones; pass `overlay_types` to give it its own
+    (e.g. league-average fastballs against one pitcher's splitter). That only
+    makes sense pooled into a single row, so it can't be combined with
+    `compare_types`.
     """
 
+    if overlay_types is not None and compare_types:
+        raise ValueError("overlay_types can't be combined with compare_types: per-type rows need both sides on the same types.")
+
     type_groups = [[pitch_type] for pitch_type in selected_types] if compare_types else [list(selected_types)]
+    overlay_type_groups = type_groups if overlay_types is None else [list(overlay_types)]
     rows = []
-    for types_in_row in type_groups:
+    for types_in_row, overlay_types_in_row in zip(type_groups, overlay_type_groups):
         background = background_source[background_source["pitch_type"].isin(types_in_row)]
-        overlay = overlay_source[overlay_source["pitch_type"].isin(types_in_row)] if overlay_source is not None else None
+        overlay = overlay_source[overlay_source["pitch_type"].isin(overlay_types_in_row)] if overlay_source is not None else None
+        label = "/".join(types_in_row)
+        if overlay_types is not None:
+            label = f"{label} vs {'/'.join(overlay_types_in_row)}"
         rows.append({
-            "label": "/".join(types_in_row),
+            "label": label,
             "background": background,
             "overlay": overlay,
             "overlay_label": overlay_label,
@@ -143,7 +196,8 @@ def location_figure(rows, title_suffix, overlay_alpha=1.0):
             ax.plot(
                 [-ZONE_HALF_WIDTH_FT, ZONE_HALF_WIDTH_FT, ZONE_HALF_WIDTH_FT, -ZONE_HALF_WIDTH_FT, -ZONE_HALF_WIDTH_FT],
                 [0, 0, 1, 1, 0],
-                color="black", linewidth=1.2,
+                color="black", linewidth=1.2, zorder=ZONE_ZORDER,
+                path_effects=[pe.withStroke(linewidth=ZONE_HALO_WIDTH, foreground="white", alpha=ZONE_HALO_ALPHA)],
             )
             ax.set_title(title, fontsize=9 if n_rows > 1 else 10)
             ax.set_xlim(-2.5, 2.5)
@@ -158,7 +212,7 @@ def location_figure(rows, title_suffix, overlay_alpha=1.0):
 
     if has_overlay:
         axes[0][0].legend(loc="upper right", fontsize=8, framealpha=0.8)
-    fig.suptitle(f"Pitch location by count-leverage bucket (black box = strike zone) -- {title_suffix}")
+    fig.suptitle(f"Pitch location by count-leverage bucket (boxed outline = strike zone): {title_suffix}")
     fig.tight_layout()
     return fig
 
@@ -205,9 +259,13 @@ def zone_share_figure(engineered, title_suffix, comparison=None, comparison_labe
         fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines", line=dict(color="black", width=2.5), name=title_suffix))
         fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines", line=dict(color="black", width=2, dash="dash"), name=comparison_label))
 
+    title = f"Pitch Locations by Count: {title_suffix}"
+    if comparison is not None and not comparison.empty:
+        title += f" vs {comparison_label}"
+
     fig.update_layout(
-        title=f"Where in the zone pitches go, by count -- {title_suffix}",
-        xaxis=dict(title="Count (balls-strikes), sorted pitcher-ahead to hitter-ahead -- not alphabetical", showgrid=False),
+        title=title,
+        xaxis=dict(title="Count (balls-strikes), ordered pitcher-ahead to hitter-ahead", showgrid=False),
         yaxis=dict(title="Share of pitches in this zone group", tickformat=".0%", showgrid=False),
         template="plotly_white",
         # A transparent legend was hard to read wherever it overlapped a line;
